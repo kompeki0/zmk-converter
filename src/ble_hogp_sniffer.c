@@ -191,10 +191,14 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
                     struct net_buf_simple *ad) {
     int err;
+    char addr_str[BT_ADDR_LE_STR_LEN];
 
-    ARG_UNUSED(rssi);
-    ARG_UNUSED(adv_type);
     ARG_UNUSED(ad);
+
+    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_SCAN_EVENTS)) {
+        bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
+        LOG_INF("ADV: %s type=%u rssi=%d", addr_str, adv_type, rssi);
+    }
 
     if (default_conn || connecting) {
         return;
@@ -273,6 +277,8 @@ static int parse_target_addr(void) {
 
 static int ble_hogp_sniffer_init(void) {
     int err;
+
+    LOG_INF("BLE HOGP sniffer init");
 
     err = bt_enable(NULL);
     if (err && err != -EALREADY) {

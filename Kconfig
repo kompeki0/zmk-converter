@@ -29,4 +29,11 @@ config ZMK_BLE_HOGP_SNIFFER_LOG_LEVEL
     help
       0=OFF, 1=ERR, 2=WRN, 3=INF, 4=DBG.
 
+config ZMK_BLE_HOGP_SNIFFER_LOG_SCAN_EVENTS
+    bool "Log all scan events"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    default y
+    help
+      Log every received advertising packet address/type/RSSI while scanning.
+
 endmenu
