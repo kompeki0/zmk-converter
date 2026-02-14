@@ -26,6 +26,14 @@ For BLE visibility test from PC (fresh pair each boot):
 west build -s zmk/app -b seeeduino_xiao_ble -- -DZMK_CONFIG=<this_repo>/config -DSHIELD=xiao_ble_proxy -DEXTRA_CONF_FILE=\"<this_repo>/config/proxy_phase0.conf;<this_repo>/config/ble_test_visible.conf\"
 ```
 
+For one-shot full reset firmware (clear all bonds/settings-related BLE state):
+
+```sh
+west build -p always -s zmk/app -b seeeduino_xiao_ble -- -DZMK_CONFIG=<this_repo>/config -DSHIELD=xiao_ble_proxy -DEXTRA_CONF_FILE=\"<this_repo>/config/reset_all_once.conf\"
+```
+
+After flashing and booting this reset firmware once, flash your normal firmware again.
+
 ## Flash
 ```sh
 west flash
