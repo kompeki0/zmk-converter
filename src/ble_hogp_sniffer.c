@@ -15,6 +15,7 @@
 
 #include <zmk/event_manager.h>
 #include <zmk/endpoints.h>
+#include <zmk/usb.h>
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 #include <zmk/events/keycode_state_changed.h>
@@ -66,6 +67,17 @@ static const uint8_t selftest_usages[] = {
     0x0a, /* g */
 };
 
+static void selftest_log_state(const char *where) {
+    enum zmk_usb_conn_state usb_state = zmk_usb_get_conn_state();
+    struct zmk_endpoint_instance selected = zmk_endpoint_get_selected();
+    char sel_str[ZMK_ENDPOINT_STR_LEN];
+
+    (void)zmk_endpoint_instance_to_str(selected, sel_str, sizeof(sel_str));
+
+    LOG_INF("Selftest(%s): usb_state=%d hid_state=%d selected=%s connected=%d",
+            where, (int)usb_state, (int)ZMK_USB_CONN_HID, sel_str, (int)zmk_endpoint_is_connected());
+}
+
 static void selftest_work_handler(struct k_work *work) {
     ARG_UNUSED(work);
 
@@ -73,15 +85,23 @@ static void selftest_work_handler(struct k_work *work) {
         return;
     }
 
-    /* Wait until ZMK has any connected output endpoint (USB or BLE). */
-    if (!zmk_endpoint_is_connected()) {
+    selftest_log_state("tick");
+
+    /*
+     * Prefer waiting for a real host connection. Some setups may still accept
+     * USB output before ZMK considers an endpoint "connected", so we also
+     * allow USB HID state to trigger the test.
+     */
+    enum zmk_usb_conn_state usb_state = zmk_usb_get_conn_state();
+    bool ready = zmk_endpoint_is_connected() || (usb_state == ZMK_USB_CONN_HID);
+
+    if (!ready) {
         if (selftest_attempts++ < 30) {
             k_work_schedule(&selftest_work, K_MSEC(500));
         } else {
-            LOG_WRN("Selftest: no endpoint connected, giving up");
-            selftest_done = true;
+            LOG_WRN("Selftest: no endpoint ready after timeout, sending anyway");
+            /* fall through to send */
         }
-        return;
     }
 
     if (selftest_pos >= ARRAY_SIZE(selftest_usages)) {
