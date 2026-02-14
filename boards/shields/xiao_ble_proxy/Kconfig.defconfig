@@ -1,0 +1,15 @@
+if SHIELD_XIAO_BLE_PROXY
+
+config ZMK_KEYBOARD_NAME
+    default "XIAO Proxy"
+
+config ZMK_BLE_HOGP_SNIFFER
+    default y
+
+config ZMK_BLE_HOGP_SNIFFER_TARGET_MAC
+    default "dd:75:7b:9c:8a:1f"
+
+config ZMK_BLE_HOGP_SNIFFER_TARGET_ADDR_TYPE_PUBLIC
+    default n
+
+endif

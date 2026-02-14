@@ -1,3 +1,6 @@
+name: zmk-keyboard-xiao-ble-proxy
 build:
+  cmake: .
+  kconfig: Kconfig
   settings:
     board_root: .

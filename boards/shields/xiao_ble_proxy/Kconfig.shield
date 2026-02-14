@@ -1,0 +1,2 @@
+config SHIELD_XIAO_BLE_PROXY
+    def_bool $(shields_list_contains,xiao_ble_proxy)

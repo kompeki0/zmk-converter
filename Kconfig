@@ -1,0 +1,32 @@
+menu "BLE HOGP Sniffer"
+
+config ZMK_BLE_HOGP_SNIFFER
+    bool "Enable BLE HOGP sniffer"
+    depends on BT && BT_CENTRAL && BT_OBSERVER && BT_GATT_CLIENT
+    help
+      Connect to a fixed BLE HID keyboard and subscribe to HID Input
+      Report notifications, then print incoming reports in logs.
+
+config ZMK_BLE_HOGP_SNIFFER_TARGET_MAC
+    string "Target MAC address"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    default "dd:75:7b:9c:8a:1f"
+    help
+      Target device address in xx:xx:xx:xx:xx:xx format.
+
+config ZMK_BLE_HOGP_SNIFFER_TARGET_ADDR_TYPE_PUBLIC
+    bool "Target address type is public"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    default n
+    help
+      If disabled, target address type is treated as random/static random.
+
+config ZMK_BLE_HOGP_SNIFFER_LOG_LEVEL
+    int "Log level"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    range 0 4
+    default 3
+    help
+      0=OFF, 1=ERR, 2=WRN, 3=INF, 4=DBG.
+
+endmenu

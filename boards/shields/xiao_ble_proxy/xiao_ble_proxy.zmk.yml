@@ -1,0 +1,10 @@
+file_format: "1"
+id: xiao_ble_proxy
+name: XIAO BLE Proxy
+type: shield
+url: https://github.com/zmkfirmware/zmk
+requires:
+  - seeeduino_xiao_ble
+features:
+  - keys
+  - ble
