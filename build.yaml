@@ -21,3 +21,13 @@
 include:
   - board: seeeduino_xiao_ble
     shield: xiao_ble_proxy
+    artifact-name: xiao_ble_proxy_normal
+
+  - board: seeeduino_xiao_ble
+    shield: xiao_ble_proxy
+    artifact-name: xiao_ble_proxy_reset_all
+    cmake-args: >
+      -DCONFIG_ZMK_BLE_CLEAR_BONDS_ON_START=y
+      -DCONFIG_ZMK_BLE_HOGP_SNIFFER_CLEAR_NON_TARGET_BONDS_ON_START=y
+      -DCONFIG_ZMK_BLE_HOGP_SNIFFER_CLEAR_TARGET_BOND_ON_START=y
+      -DCONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_SCAN_EVENTS=n
