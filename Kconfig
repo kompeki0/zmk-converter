@@ -53,4 +53,12 @@ config ZMK_BLE_HOGP_SNIFFER_CLEAR_NON_TARGET_BONDS_ON_START
       keyboard bond. Useful for re-pairing with host PCs without resetting
       the keyboard link.
 
+config ZMK_BLE_HOGP_SNIFFER_CLEAR_TARGET_BOND_ON_START
+    bool "Clear target keyboard bond on boot"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    default n
+    help
+      Clear the target keyboard bond on startup. Enable temporarily when
+      keyboard pairing gets stuck, then disable again.
+
 endmenu

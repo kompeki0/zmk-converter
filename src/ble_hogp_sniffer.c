@@ -168,8 +168,9 @@ static void clear_non_target_bonds_cb(const struct bt_bond_info *info, void *use
     struct clear_bonds_ctx *ctx = user_data;
     int err;
     char addr_str[BT_ADDR_LE_STR_LEN];
+    bool is_target = (info->addr.type == ctx->keep.type && bt_addr_eq(&info->addr.a, &ctx->keep.a));
 
-    if (info->addr.type == ctx->keep.type && bt_addr_eq(&info->addr.a, &ctx->keep.a)) {
+    if (is_target && !IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_CLEAR_TARGET_BOND_ON_START)) {
         bt_addr_le_to_str(&info->addr, addr_str, sizeof(addr_str));
         LOG_INF("Keeping bond: %s", addr_str);
         return;
@@ -343,6 +344,11 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     }
 
     LOG_INF("Connected to target");
+    derr = bt_conn_set_security(conn, BT_SECURITY_L2);
+    if (derr && derr != -EALREADY) {
+        LOG_WRN("bt_conn_set_security failed (%d)", derr);
+    }
+
     derr = discover_hids(conn);
     if (derr) {
         LOG_ERR("HID discovery start failed (%d)", derr);
