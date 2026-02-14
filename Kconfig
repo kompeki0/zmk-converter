@@ -61,4 +61,12 @@ config ZMK_BLE_HOGP_SNIFFER_CLEAR_TARGET_BOND_ON_START
       Clear the target keyboard bond on startup. Enable temporarily when
       keyboard pairing gets stuck, then disable again.
 
+config ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT
+    bool "Type 'testing' to host a few seconds after boot (debug)"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    default n
+    help
+      After boot, when an output endpoint is connected, emit key events to type
+      the string 'testing'. This is for quickly confirming host connectivity.
+
 endmenu

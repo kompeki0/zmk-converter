@@ -14,10 +14,7 @@
 #include <zephyr/sys/util.h>
 
 #include <zmk/event_manager.h>
-#include <zmk/events/usb_conn_state_changed.h>
-#include <zmk/usb.h>
 #include <zmk/endpoints.h>
-#include <zmk/endpoints_types.h>
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 #include <zmk/events/keycode_state_changed.h>
@@ -33,6 +30,13 @@ static struct bt_gatt_discover_params discover_params;
 static struct bt_gatt_subscribe_params subscribe_params;
 static bt_addr_le_t target_addr;
 static struct k_work_delayable sniffer_start_work;
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT)
+static struct k_work_delayable selftest_work;
+static uint8_t selftest_attempts;
+static uint8_t selftest_pos;
+static bool selftest_press;
+static bool selftest_done;
+#endif
 
 static uint16_t hids_start_handle;
 static uint16_t hids_end_handle;
@@ -47,8 +51,60 @@ static uint8_t prev_usages[MAX_PRESSED_USAGES];
 static size_t prev_usage_count;
 
 static int start_scan(void);
-static void set_output_endpoint_auto(const char *reason);
 static int clear_non_target_bonds(void);
+
+static void emit_usage_state(uint8_t usage, bool pressed);
+
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT)
+static const uint8_t selftest_usages[] = {
+    0x17, /* t */
+    0x08, /* e */
+    0x16, /* s */
+    0x17, /* t */
+    0x0c, /* i */
+    0x11, /* n */
+    0x0a, /* g */
+};
+
+static void selftest_work_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+
+    if (!IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT) || selftest_done) {
+        return;
+    }
+
+    /* Wait until ZMK has any connected output endpoint (USB or BLE). */
+    if (!zmk_endpoint_is_connected()) {
+        if (selftest_attempts++ < 30) {
+            k_work_schedule(&selftest_work, K_MSEC(500));
+        } else {
+            LOG_WRN("Selftest: no endpoint connected, giving up");
+            selftest_done = true;
+        }
+        return;
+    }
+
+    if (selftest_pos >= ARRAY_SIZE(selftest_usages)) {
+        selftest_done = true;
+        LOG_INF("Selftest: done");
+        return;
+    }
+
+    uint8_t usage = selftest_usages[selftest_pos];
+
+    if (!selftest_press) {
+        emit_usage_state(usage, true);
+        selftest_press = true;
+        k_work_schedule(&selftest_work, K_MSEC(20));
+        return;
+    }
+
+    emit_usage_state(usage, false);
+    selftest_press = false;
+    selftest_pos++;
+    k_work_schedule(&selftest_work, K_MSEC(60));
+}
+#endif
 
 static bool usage_exists(const uint8_t *usages, size_t count, uint8_t usage) {
     for (size_t i = 0; i < count; i++) {
@@ -133,20 +189,6 @@ static void process_boot_report(const uint8_t *report, size_t report_len) {
     memcpy(prev_usages, curr_usages, curr_usage_count);
 }
 
-static void set_output_endpoint_auto(const char *reason) {
-    enum zmk_usb_conn_state usb_state = zmk_usb_get_conn_state();
-    bool use_usb = (usb_state == ZMK_USB_CONN_HID);
-    enum zmk_transport transport = use_usb ? ZMK_TRANSPORT_USB : ZMK_TRANSPORT_BLE;
-    int err = zmk_endpoint_set_preferred_transport(transport);
-
-    if (err) {
-        LOG_WRN("Endpoint select failed (%d) reason=%s", err, reason);
-        return;
-    }
-
-    LOG_INF("Preferred transport set to %s reason=%s", use_usb ? "USB" : "BLE", reason);
-}
-
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_CLEAR_NON_TARGET_BONDS_ON_START)
 struct clear_bonds_ctx {
     bt_addr_le_t keep;
@@ -186,17 +228,6 @@ static int clear_non_target_bonds(void) {
 #endif
     return 0;
 }
-
-static int usb_conn_state_listener(const zmk_event_t *eh) {
-    if (as_zmk_usb_conn_state_changed(eh) != NULL) {
-        set_output_endpoint_auto("usb_state_changed");
-    }
-
-    return ZMK_EV_EVENT_BUBBLE;
-}
-
-ZMK_LISTENER(ble_hogp_sniffer_usb_conn_state, usb_conn_state_listener);
-ZMK_SUBSCRIPTION(ble_hogp_sniffer_usb_conn_state, zmk_usb_conn_state_changed);
 
 static uint8_t notify_cb(struct bt_conn *conn, struct bt_gatt_subscribe_params *params,
                          const void *data, uint16_t length) {
@@ -465,8 +496,6 @@ static int ble_hogp_sniffer_init(void) {
     printk("[hogp] init called\r\n");
     LOG_INF("BLE HOGP sniffer init");
 
-    set_output_endpoint_auto("init");
-
     err = bt_enable(NULL);
     if (err && err != -EALREADY) {
         LOG_ERR("bt_enable failed (%d)", err);
@@ -499,6 +528,18 @@ static int ble_hogp_sniffer_schedule_init(void) {
     printk("[hogp] schedule init\r\n");
     k_work_init_delayable(&sniffer_start_work, sniffer_start_work_handler);
     k_work_schedule(&sniffer_start_work, K_SECONDS(3));
+
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT)
+    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT)) {
+        selftest_attempts = 0;
+        selftest_pos = 0;
+        selftest_press = false;
+        selftest_done = false;
+        k_work_init_delayable(&selftest_work, selftest_work_handler);
+        k_work_schedule(&selftest_work, K_SECONDS(5));
+        LOG_INF("Selftest scheduled");
+    }
+#endif
     return 0;
 }
 
