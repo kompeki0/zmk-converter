@@ -254,6 +254,7 @@ static int start_scan(void) {
 
 static int parse_target_addr(void) {
     int err;
+    const bool target_is_public = IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET_ADDR_TYPE_PUBLIC);
     bt_addr_t addr;
 
     err = bt_addr_from_str(CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET_MAC, &addr);
@@ -262,12 +263,11 @@ static int parse_target_addr(void) {
         return err;
     }
 
-    target_addr.type = CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET_ADDR_TYPE_PUBLIC ? BT_ADDR_LE_PUBLIC
-                                                                            : BT_ADDR_LE_RANDOM;
+    target_addr.type = target_is_public ? BT_ADDR_LE_PUBLIC : BT_ADDR_LE_RANDOM;
     bt_addr_copy(&target_addr.a, &addr);
 
     LOG_INF("Target MAC: %s (%s)", CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET_MAC,
-            CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET_ADDR_TYPE_PUBLIC ? "public" : "random");
+            target_is_public ? "public" : "random");
     return 0;
 }
 
