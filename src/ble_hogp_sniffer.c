@@ -14,7 +14,7 @@
 #include <zephyr/sys/util.h>
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-#include <zmk/events/keycode_state_changed.h>
+#include <zmk/events/keycode-state-changed.h>
 #endif
 
 LOG_MODULE_REGISTER(ble_hogp_sniffer, CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_LEVEL);
