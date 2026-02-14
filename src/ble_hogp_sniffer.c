@@ -17,6 +17,7 @@
 #include <zmk/events/usb_conn_state_changed.h>
 #include <zmk/usb.h>
 #include <zmk/endpoints.h>
+#include <zmk/endpoints_types.h>
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 #include <zmk/events/keycode_state_changed.h>
@@ -26,14 +27,6 @@ LOG_MODULE_REGISTER(ble_hogp_sniffer, CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_LEVEL);
 
 #define BOOT_KBD_REPORT_LEN 8
 #define MAX_PRESSED_USAGES 14
-
-#if defined(ZMK_ENDPOINT_USB) && defined(ZMK_ENDPOINT_BLE)
-#define HOGP_OUT_USB ZMK_ENDPOINT_USB
-#define HOGP_OUT_BLE ZMK_ENDPOINT_BLE
-#elif defined(ZMK_TRANSPORT_USB) && defined(ZMK_TRANSPORT_BLE)
-#define HOGP_OUT_USB ZMK_TRANSPORT_USB
-#define HOGP_OUT_BLE ZMK_TRANSPORT_BLE
-#endif
 
 static struct bt_conn *default_conn;
 static struct bt_gatt_discover_params discover_params;
@@ -143,20 +136,15 @@ static void process_boot_report(const uint8_t *report, size_t report_len) {
 static void set_output_endpoint_auto(const char *reason) {
     enum zmk_usb_conn_state usb_state = zmk_usb_get_conn_state();
     bool use_usb = (usb_state == ZMK_USB_CONN_HID);
-#if defined(HOGP_OUT_USB) && defined(HOGP_OUT_BLE)
-    int endpoint = use_usb ? HOGP_OUT_USB : HOGP_OUT_BLE;
-    int err = zmk_endpoints_select(endpoint);
+    enum zmk_transport transport = use_usb ? ZMK_TRANSPORT_USB : ZMK_TRANSPORT_BLE;
+    int err = zmk_endpoint_set_preferred_transport(transport);
 
     if (err) {
         LOG_WRN("Endpoint select failed (%d) reason=%s", err, reason);
         return;
     }
 
-    LOG_INF("Endpoint set to %s reason=%s", use_usb ? "USB" : "BLE", reason);
-#else
-    ARG_UNUSED(reason);
-    LOG_WRN("Endpoint select constants not available in this ZMK version");
-#endif
+    LOG_INF("Preferred transport set to %s reason=%s", use_usb ? "USB" : "BLE", reason);
 }
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_CLEAR_NON_TARGET_BONDS_ON_START)
