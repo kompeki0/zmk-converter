@@ -1,1 +1,2 @@
 target_sources_ifdef(CONFIG_ZMK_BLE_HOGP_SNIFFER app PRIVATE src/ble_hogp_sniffer.c)
+zephyr_include_directories(include)
