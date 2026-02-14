@@ -14,7 +14,6 @@
 #include <zephyr/sys/util.h>
 
 #include <zmk/event_manager.h>
-#include <zmk/endpoints.h>
 #include <zmk/usb.h>
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
@@ -55,7 +54,9 @@ static size_t prev_usage_count;
 static int start_scan(void);
 static int clear_non_target_bonds(void);
 
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 static void emit_usage_state(uint8_t usage, bool pressed);
+#endif
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT) &&                                \
     defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
@@ -69,14 +70,6 @@ static const uint8_t selftest_usages[] = {
     0x0a, /* g */
 };
 
-static void selftest_log_state(const char *where) {
-    enum zmk_usb_conn_state usb_state = zmk_usb_get_conn_state();
-    bool hid_ready = zmk_usb_is_hid_ready();
-
-    LOG_INF("Selftest(%s): usb_state=%d hid_state=%d hid_ready=%d endpoint_connected=%d", where,
-            (int)usb_state, (int)ZMK_USB_CONN_HID, (int)hid_ready, (int)zmk_endpoint_is_connected());
-}
-
 static void selftest_work_handler(struct k_work *work) {
     ARG_UNUSED(work);
 
@@ -84,28 +77,16 @@ static void selftest_work_handler(struct k_work *work) {
         return;
     }
 
-    selftest_log_state("tick");
-
-    /*
-     * Prefer waiting for a real host connection. Some setups may still accept
-     * USB output before ZMK considers an endpoint "connected", so we also
-     * allow USB HID state to trigger the test.
-     */
-    enum zmk_usb_conn_state usb_state = zmk_usb_get_conn_state();
-    bool ready = zmk_endpoint_is_connected() || (usb_state == ZMK_USB_CONN_HID) || zmk_usb_is_hid_ready();
-
-    if (!ready) {
+    /* For the USB connectivity test, only run when HID is ready. */
+    if (!zmk_usb_is_hid_ready()) {
         if (selftest_attempts++ < 30) {
             k_work_schedule(&selftest_work, K_MSEC(500));
-        } else {
-            LOG_WRN("Selftest: no endpoint ready after timeout, sending anyway");
-            /* fall through to send */
         }
+        return;
     }
 
     if (selftest_pos >= ARRAY_SIZE(selftest_usages)) {
         selftest_done = true;
-        LOG_INF("Selftest: done");
         return;
     }
 
