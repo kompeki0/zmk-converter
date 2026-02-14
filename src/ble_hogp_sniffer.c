@@ -27,6 +27,14 @@ LOG_MODULE_REGISTER(ble_hogp_sniffer, CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_LEVEL);
 #define BOOT_KBD_REPORT_LEN 8
 #define MAX_PRESSED_USAGES 14
 
+#if defined(ZMK_ENDPOINT_USB) && defined(ZMK_ENDPOINT_BLE)
+#define HOGP_OUT_USB ZMK_ENDPOINT_USB
+#define HOGP_OUT_BLE ZMK_ENDPOINT_BLE
+#elif defined(ZMK_TRANSPORT_USB) && defined(ZMK_TRANSPORT_BLE)
+#define HOGP_OUT_USB ZMK_TRANSPORT_USB
+#define HOGP_OUT_BLE ZMK_TRANSPORT_BLE
+#endif
+
 static struct bt_conn *default_conn;
 static struct bt_gatt_discover_params discover_params;
 static struct bt_gatt_subscribe_params subscribe_params;
@@ -133,7 +141,9 @@ static void process_boot_report(const uint8_t *report, size_t report_len) {
 
 static void set_output_endpoint_auto(const char *reason) {
     enum zmk_usb_conn_state usb_state = zmk_usb_get_conn_state();
-    int endpoint = (usb_state == ZMK_USB_CONN_HID) ? ZMK_ENDPOINT_USB : ZMK_ENDPOINT_BLE;
+    bool use_usb = (usb_state == ZMK_USB_CONN_HID);
+#if defined(HOGP_OUT_USB) && defined(HOGP_OUT_BLE)
+    int endpoint = use_usb ? HOGP_OUT_USB : HOGP_OUT_BLE;
     int err = zmk_endpoints_select(endpoint);
 
     if (err) {
@@ -141,7 +151,11 @@ static void set_output_endpoint_auto(const char *reason) {
         return;
     }
 
-    LOG_INF("Endpoint set to %s reason=%s", endpoint == ZMK_ENDPOINT_USB ? "USB" : "BLE", reason);
+    LOG_INF("Endpoint set to %s reason=%s", use_usb ? "USB" : "BLE", reason);
+#else
+    ARG_UNUSED(reason);
+    LOG_WRN("Endpoint select constants not available in this ZMK version");
+#endif
 }
 
 static int usb_conn_state_listener(const zmk_event_t *eh) {
