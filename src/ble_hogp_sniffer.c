@@ -55,6 +55,7 @@ static size_t prev_usage_count;
 
 static int start_scan(void);
 static void set_output_endpoint_auto(const char *reason);
+static int clear_non_target_bonds(void);
 
 static bool usage_exists(const uint8_t *usages, size_t count, uint8_t usage) {
     for (size_t i = 0; i < count; i++) {
@@ -156,6 +157,45 @@ static void set_output_endpoint_auto(const char *reason) {
     ARG_UNUSED(reason);
     LOG_WRN("Endpoint select constants not available in this ZMK version");
 #endif
+}
+
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_CLEAR_NON_TARGET_BONDS_ON_START)
+struct clear_bonds_ctx {
+    bt_addr_le_t keep;
+};
+
+static void clear_non_target_bonds_cb(const struct bt_bond_info *info, void *user_data) {
+    struct clear_bonds_ctx *ctx = user_data;
+    int err;
+    char addr_str[BT_ADDR_LE_STR_LEN];
+
+    if (info->addr.type == ctx->keep.type && bt_addr_eq(&info->addr.a, &ctx->keep.a)) {
+        bt_addr_le_to_str(&info->addr, addr_str, sizeof(addr_str));
+        LOG_INF("Keeping bond: %s", addr_str);
+        return;
+    }
+
+    err = bt_unpair(BT_ID_DEFAULT, &info->addr);
+    bt_addr_le_to_str(&info->addr, addr_str, sizeof(addr_str));
+    if (err) {
+        LOG_WRN("Failed to clear bond %s (%d)", addr_str, err);
+    } else {
+        LOG_INF("Cleared bond: %s", addr_str);
+    }
+}
+#endif
+
+static int clear_non_target_bonds(void) {
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_CLEAR_NON_TARGET_BONDS_ON_START)
+    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_CLEAR_NON_TARGET_BONDS_ON_START)) {
+        struct clear_bonds_ctx ctx = {
+            .keep = target_addr,
+        };
+
+        bt_foreach_bond(BT_ID_DEFAULT, clear_non_target_bonds_cb, &ctx);
+    }
+#endif
+    return 0;
 }
 
 static int usb_conn_state_listener(const zmk_event_t *eh) {
@@ -443,6 +483,8 @@ static int ble_hogp_sniffer_init(void) {
     if (err) {
         return err;
     }
+
+    (void)clear_non_target_bonds();
 
     err = start_scan();
     if (err) {

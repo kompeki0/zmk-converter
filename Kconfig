@@ -44,4 +44,13 @@ config ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS
       Parse standard 8-byte keyboard input reports and emit press/release
       events through ZMK so the board can output to the host.
 
+config ZMK_BLE_HOGP_SNIFFER_CLEAR_NON_TARGET_BONDS_ON_START
+    bool "Clear all BLE bonds except target keyboard on boot"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    default y
+    help
+      Remove non-target bonds at startup while preserving the fixed target
+      keyboard bond. Useful for re-pairing with host PCs without resetting
+      the keyboard link.
+
 endmenu
