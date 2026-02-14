@@ -64,6 +64,7 @@ config ZMK_BLE_HOGP_SNIFFER_CLEAR_TARGET_BOND_ON_START
 config ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT
     bool "Type 'testing' to host a few seconds after boot (debug)"
     depends on ZMK_BLE_HOGP_SNIFFER
+    depends on ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS
     default n
     help
       After boot, when an output endpoint is connected, emit key events to type

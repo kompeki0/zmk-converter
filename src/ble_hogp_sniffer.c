@@ -31,7 +31,8 @@ static struct bt_gatt_discover_params discover_params;
 static struct bt_gatt_subscribe_params subscribe_params;
 static bt_addr_le_t target_addr;
 static struct k_work_delayable sniffer_start_work;
-#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT)
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT) &&                                \
+    defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 static struct k_work_delayable selftest_work;
 static uint8_t selftest_attempts;
 static uint8_t selftest_pos;
@@ -56,7 +57,8 @@ static int clear_non_target_bonds(void);
 
 static void emit_usage_state(uint8_t usage, bool pressed);
 
-#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT)
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT) &&                                \
+    defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 static const uint8_t selftest_usages[] = {
     0x17, /* t */
     0x08, /* e */
@@ -516,6 +518,16 @@ static int ble_hogp_sniffer_init(void) {
     printk("[hogp] init called\r\n");
     LOG_INF("BLE HOGP sniffer init");
 
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT) &&                                \
+    defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT) && !selftest_done &&
+        selftest_attempts == 0 && selftest_pos == 0) {
+        k_work_init_delayable(&selftest_work, selftest_work_handler);
+        k_work_schedule(&selftest_work, K_SECONDS(5));
+        LOG_INF("Selftest scheduled (from init)");
+    }
+#endif
+
     err = bt_enable(NULL);
     if (err && err != -EALREADY) {
         LOG_ERR("bt_enable failed (%d)", err);
@@ -548,18 +560,6 @@ static int ble_hogp_sniffer_schedule_init(void) {
     printk("[hogp] schedule init\r\n");
     k_work_init_delayable(&sniffer_start_work, sniffer_start_work_handler);
     k_work_schedule(&sniffer_start_work, K_SECONDS(3));
-
-#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT)
-    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT)) {
-        selftest_attempts = 0;
-        selftest_pos = 0;
-        selftest_press = false;
-        selftest_done = false;
-        k_work_init_delayable(&selftest_work, selftest_work_handler);
-        k_work_schedule(&selftest_work, K_SECONDS(5));
-        LOG_INF("Selftest scheduled");
-    }
-#endif
     return 0;
 }
 
