@@ -8,6 +8,7 @@
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/init.h>
+#include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
 
@@ -17,6 +18,7 @@ static struct bt_conn *default_conn;
 static struct bt_gatt_discover_params discover_params;
 static struct bt_gatt_subscribe_params subscribe_params;
 static bt_addr_le_t target_addr;
+static struct k_work_delayable sniffer_start_work;
 
 static uint16_t hids_start_handle;
 static uint16_t hids_end_handle;
@@ -278,6 +280,7 @@ static int parse_target_addr(void) {
 static int ble_hogp_sniffer_init(void) {
     int err;
 
+    printk("[hogp] init called\r\n");
     LOG_INF("BLE HOGP sniffer init");
 
     err = bt_enable(NULL);
@@ -291,7 +294,26 @@ static int ble_hogp_sniffer_init(void) {
         return err;
     }
 
-    return start_scan();
+    err = start_scan();
+    if (err) {
+        printk("[hogp] start_scan failed: %d\r\n", err);
+    } else {
+        printk("[hogp] scan start requested\r\n");
+    }
+
+    return err;
 }
 
-SYS_INIT(ble_hogp_sniffer_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+static void sniffer_start_work_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+    (void)ble_hogp_sniffer_init();
+}
+
+static int ble_hogp_sniffer_schedule_init(void) {
+    printk("[hogp] schedule init\r\n");
+    k_work_init_delayable(&sniffer_start_work, sniffer_start_work_handler);
+    k_work_schedule(&sniffer_start_work, K_SECONDS(3));
+    return 0;
+}
+
+SYS_INIT(ble_hogp_sniffer_schedule_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
