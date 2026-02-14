@@ -1,0 +1,16 @@
+description: ZMK HOGP proxy virtual kscan
+
+compatible: "zmk,kscan-hogp-proxy"
+
+include: base.yaml
+
+properties:
+  rows:
+    type: int
+    required: true
+    description: Number of rows in the virtual matrix
+
+  columns:
+    type: int
+    required: true
+    description: Number of columns in the virtual matrix

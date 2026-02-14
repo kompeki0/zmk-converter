@@ -44,6 +44,14 @@ config ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS
       Parse standard 8-byte keyboard input reports and emit press/release
       events through ZMK so the board can output to the host.
 
+config ZMK_BLE_HOGP_SNIFFER_EMIT_POSITION_EVENTS
+    bool "Emit virtual kscan events (positions) for keymap remapping"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    default y
+    help
+      Convert incoming HID keyboard usages into virtual matrix row/col events
+      so they flow through the normal ZMK keymap/behavior pipeline.
+
 config ZMK_BLE_HOGP_SNIFFER_CLEAR_NON_TARGET_BONDS_ON_START
     bool "Clear all BLE bonds except target keyboard on boot"
     depends on ZMK_BLE_HOGP_SNIFFER

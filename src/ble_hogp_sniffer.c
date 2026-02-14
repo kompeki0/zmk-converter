@@ -58,6 +58,31 @@ static int clear_non_target_bonds(void);
 static void emit_usage_state(uint8_t usage, bool pressed);
 #endif
 
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_EMIT_POSITION_EVENTS)
+int zmk_hogp_proxy_kscan_inject(uint16_t row, uint16_t col, bool pressed);
+#endif
+
+static bool usage_to_row_col(uint8_t usage, uint16_t *row, uint16_t *col) {
+    /* Minimal mapping for experiment:
+     * - Letters A..Z: HID usages 0x04..0x1D -> col 0..25
+     * - Modifiers: 0xE0..0xE7 -> col 26..33
+     * Matrix is 1 row x 34 cols.
+     */
+    if (usage >= 0x04 && usage <= 0x1D) {
+        *row = 0;
+        *col = (uint16_t)(usage - 0x04);
+        return true;
+    }
+
+    if (usage >= 0xE0 && usage <= 0xE7) {
+        *row = 0;
+        *col = (uint16_t)(26 + (usage - 0xE0));
+        return true;
+    }
+
+    return false;
+}
+
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT) &&                                \
     defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 static const uint8_t selftest_usages[] = {
@@ -170,7 +195,8 @@ static void process_boot_report(const uint8_t *report, size_t report_len) {
     build_usage_set_from_boot_report(report, report_len, curr_usages, &curr_usage_count);
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)) {
+    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS) &&
+        !IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_EMIT_POSITION_EVENTS)) {
         for (size_t i = 0; i < prev_usage_count; i++) {
             if (!usage_exists(curr_usages, curr_usage_count, prev_usages[i])) {
                 emit_usage_state(prev_usages[i], false);
@@ -180,6 +206,28 @@ static void process_boot_report(const uint8_t *report, size_t report_len) {
         for (size_t i = 0; i < curr_usage_count; i++) {
             if (!usage_exists(prev_usages, prev_usage_count, curr_usages[i])) {
                 emit_usage_state(curr_usages[i], true);
+            }
+        }
+    }
+#endif
+
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_EMIT_POSITION_EVENTS)
+    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_EMIT_POSITION_EVENTS)) {
+        for (size_t i = 0; i < prev_usage_count; i++) {
+            if (!usage_exists(curr_usages, curr_usage_count, prev_usages[i])) {
+                uint16_t row, col;
+                if (usage_to_row_col(prev_usages[i], &row, &col)) {
+                    (void)zmk_hogp_proxy_kscan_inject(row, col, false);
+                }
+            }
+        }
+
+        for (size_t i = 0; i < curr_usage_count; i++) {
+            if (!usage_exists(prev_usages, prev_usage_count, curr_usages[i])) {
+                uint16_t row, col;
+                if (usage_to_row_col(curr_usages[i], &row, &col)) {
+                    (void)zmk_hogp_proxy_kscan_inject(row, col, true);
+                }
             }
         }
     }

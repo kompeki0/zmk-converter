@@ -1,2 +1,3 @@
 target_sources_ifdef(CONFIG_ZMK_BLE_HOGP_SNIFFER app PRIVATE src/ble_hogp_sniffer.c)
+target_sources_ifdef(CONFIG_ZMK_BLE_HOGP_SNIFFER app PRIVATE drivers/kscan/kscan_hogp_proxy.c)
 zephyr_include_directories(include)
