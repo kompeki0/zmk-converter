@@ -1,2 +1,1 @@
-zephyr_library()
-zephyr_library_sources_ifdef(CONFIG_ZMK_BLE_HOGP_SNIFFER src/ble_hogp_sniffer.c)
+target_sources_ifdef(CONFIG_ZMK_BLE_HOGP_SNIFFER app PRIVATE src/ble_hogp_sniffer.c)
