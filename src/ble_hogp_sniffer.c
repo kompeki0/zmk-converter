@@ -17,6 +17,7 @@
 #include <zmk/event_manager.h>
 #include <zmk/events/keycode_state_changed.h>
 #endif
+#include <zmk/endpoints.h>
 
 LOG_MODULE_REGISTER(ble_hogp_sniffer, CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_LEVEL);
 
@@ -387,6 +388,13 @@ static int ble_hogp_sniffer_init(void) {
 
     printk("[hogp] init called\r\n");
     LOG_INF("BLE HOGP sniffer init");
+
+    err = zmk_endpoints_select(ZMK_ENDPOINT_USB);
+    if (err) {
+        LOG_WRN("Failed to select USB endpoint (%d)", err);
+    } else {
+        LOG_INF("Selected USB endpoint for output");
+    }
 
     err = bt_enable(NULL);
     if (err && err != -EALREADY) {
