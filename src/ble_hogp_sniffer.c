@@ -13,11 +13,14 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
 
-#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 #include <zmk/event_manager.h>
+#include <zmk/events/usb_conn_state_changed.h>
+#include <zmk/usb.h>
+#include <zmk/endpoints.h>
+
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 #include <zmk/events/keycode_state_changed.h>
 #endif
-#include <zmk/endpoints.h>
 
 LOG_MODULE_REGISTER(ble_hogp_sniffer, CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_LEVEL);
 
@@ -43,6 +46,7 @@ static uint8_t prev_usages[MAX_PRESSED_USAGES];
 static size_t prev_usage_count;
 
 static int start_scan(void);
+static void set_output_endpoint_auto(const char *reason);
 
 static bool usage_exists(const uint8_t *usages, size_t count, uint8_t usage) {
     for (size_t i = 0; i < count; i++) {
@@ -126,6 +130,30 @@ static void process_boot_report(const uint8_t *report, size_t report_len) {
     prev_usage_count = curr_usage_count;
     memcpy(prev_usages, curr_usages, curr_usage_count);
 }
+
+static void set_output_endpoint_auto(const char *reason) {
+    enum zmk_usb_conn_state usb_state = zmk_usb_get_conn_state();
+    int endpoint = (usb_state == ZMK_USB_CONN_HID) ? ZMK_ENDPOINT_USB : ZMK_ENDPOINT_BLE;
+    int err = zmk_endpoints_select(endpoint);
+
+    if (err) {
+        LOG_WRN("Endpoint select failed (%d) reason=%s", err, reason);
+        return;
+    }
+
+    LOG_INF("Endpoint set to %s reason=%s", endpoint == ZMK_ENDPOINT_USB ? "USB" : "BLE", reason);
+}
+
+static int usb_conn_state_listener(const zmk_event_t *eh) {
+    if (as_zmk_usb_conn_state_changed(eh) != NULL) {
+        set_output_endpoint_auto("usb_state_changed");
+    }
+
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(ble_hogp_sniffer_usb_conn_state, usb_conn_state_listener);
+ZMK_SUBSCRIPTION(ble_hogp_sniffer_usb_conn_state, zmk_usb_conn_state_changed);
 
 static uint8_t notify_cb(struct bt_conn *conn, struct bt_gatt_subscribe_params *params,
                          const void *data, uint16_t length) {
@@ -389,12 +417,7 @@ static int ble_hogp_sniffer_init(void) {
     printk("[hogp] init called\r\n");
     LOG_INF("BLE HOGP sniffer init");
 
-    err = zmk_endpoints_select(ZMK_ENDPOINT_USB);
-    if (err) {
-        LOG_WRN("Failed to select USB endpoint (%d)", err);
-    } else {
-        LOG_INF("Selected USB endpoint for output");
-    }
+    set_output_endpoint_auto("init");
 
     err = bt_enable(NULL);
     if (err && err != -EALREADY) {
