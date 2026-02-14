@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <string.h>
 
 #include <zephyr/bluetooth/addr.h>
 #include <zephyr/bluetooth/bluetooth.h>
@@ -12,7 +13,14 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
 
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+#include <zmk/events/keycode_state_changed.h>
+#endif
+
 LOG_MODULE_REGISTER(ble_hogp_sniffer, CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_LEVEL);
+
+#define BOOT_KBD_REPORT_LEN 8
+#define MAX_PRESSED_USAGES 14
 
 static struct bt_conn *default_conn;
 static struct bt_gatt_discover_params discover_params;
@@ -29,7 +37,93 @@ static struct bt_uuid_16 hids_uuid = BT_UUID_INIT_16(BT_UUID_HIDS_VAL);
 static struct bt_uuid_16 report_uuid = BT_UUID_INIT_16(BT_UUID_HIDS_REPORT_VAL);
 static struct bt_uuid_16 ccc_uuid = BT_UUID_INIT_16(BT_UUID_GATT_CCC_VAL);
 
+static uint8_t prev_usages[MAX_PRESSED_USAGES];
+static size_t prev_usage_count;
+
 static int start_scan(void);
+
+static bool usage_exists(const uint8_t *usages, size_t count, uint8_t usage) {
+    for (size_t i = 0; i < count; i++) {
+        if (usages[i] == usage) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void append_usage_unique(uint8_t *usages, size_t *count, uint8_t usage) {
+    if (usage == 0 || *count >= MAX_PRESSED_USAGES || usage_exists(usages, *count, usage)) {
+        return;
+    }
+
+    usages[(*count)++] = usage;
+}
+
+static void build_usage_set_from_boot_report(const uint8_t *report, size_t report_len, uint8_t *usages,
+                                             size_t *count) {
+    uint8_t modifiers;
+
+    *count = 0;
+    if (report_len < BOOT_KBD_REPORT_LEN) {
+        return;
+    }
+
+    modifiers = report[0];
+    for (uint8_t bit = 0; bit < 8; bit++) {
+        if (modifiers & BIT(bit)) {
+            append_usage_unique(usages, count, (uint8_t)(0xE0 + bit));
+        }
+    }
+
+    for (size_t i = 2; i < BOOT_KBD_REPORT_LEN; i++) {
+        uint8_t usage = report[i];
+
+        if (usage == 0x01 || usage == 0x02 || usage == 0x03) {
+            continue;
+        }
+
+        append_usage_unique(usages, count, usage);
+    }
+}
+
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+static void emit_usage_state(uint8_t usage, bool pressed) {
+    int err = raise_zmk_keycode_state_changed_from_encoded(usage, pressed, k_uptime_get());
+
+    if (err) {
+        LOG_WRN("Failed to emit usage 0x%02x (%s), err=%d", usage, pressed ? "down" : "up", err);
+    } else {
+        LOG_DBG("Usage 0x%02x %s", usage, pressed ? "down" : "up");
+    }
+}
+#endif
+
+static void process_boot_report(const uint8_t *report, size_t report_len) {
+    uint8_t curr_usages[MAX_PRESSED_USAGES];
+    size_t curr_usage_count = 0;
+
+    build_usage_set_from_boot_report(report, report_len, curr_usages, &curr_usage_count);
+
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)) {
+        for (size_t i = 0; i < prev_usage_count; i++) {
+            if (!usage_exists(curr_usages, curr_usage_count, prev_usages[i])) {
+                emit_usage_state(prev_usages[i], false);
+            }
+        }
+
+        for (size_t i = 0; i < curr_usage_count; i++) {
+            if (!usage_exists(prev_usages, prev_usage_count, curr_usages[i])) {
+                emit_usage_state(curr_usages[i], true);
+            }
+        }
+    }
+#endif
+
+    prev_usage_count = curr_usage_count;
+    memcpy(prev_usages, curr_usages, curr_usage_count);
+}
 
 static uint8_t notify_cb(struct bt_conn *conn, struct bt_gatt_subscribe_params *params,
                          const void *data, uint16_t length) {
@@ -42,6 +136,7 @@ static uint8_t notify_cb(struct bt_conn *conn, struct bt_gatt_subscribe_params *
     }
 
     LOG_HEXDUMP_INF(data, length, "HID Input");
+    process_boot_report(data, length);
     return BT_GATT_ITER_CONTINUE;
 }
 
@@ -181,6 +276,15 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
     default_conn = NULL;
     subscribe_params.value_handle = 0U;
     subscribe_params.ccc_handle = 0U;
+
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)) {
+        for (size_t i = 0; i < prev_usage_count; i++) {
+            emit_usage_state(prev_usages[i], false);
+        }
+    }
+#endif
+    prev_usage_count = 0;
 
     (void)start_scan();
 }

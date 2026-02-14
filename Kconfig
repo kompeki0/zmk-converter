@@ -36,4 +36,12 @@ config ZMK_BLE_HOGP_SNIFFER_LOG_SCAN_EVENTS
     help
       Log every received advertising packet address/type/RSSI while scanning.
 
+config ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS
+    bool "Forward keyboard usages as ZMK key events"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    default y
+    help
+      Parse standard 8-byte keyboard input reports and emit press/release
+      events through ZMK so the board can output to the host.
+
 endmenu
