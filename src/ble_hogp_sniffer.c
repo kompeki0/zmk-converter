@@ -11,6 +11,7 @@
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
 #include <zmk/ble.h>
@@ -60,6 +61,7 @@ static int start_scan(void);
 static int clear_non_target_bonds(void);
 static void schedule_scan_restart(void);
 static void apply_host_adv_policy(bool target_connected);
+static bool ad_contains_hids_uuid(const struct net_buf_simple *ad);
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 static void emit_usage_state(uint8_t usage, bool pressed);
@@ -548,12 +550,40 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
     .security_changed = security_changed_cb,
 };
 
+static bool ad_find_hids_uuid_cb(struct bt_data *data, void *user_data) {
+    bool *found = user_data;
+
+    if (*found) {
+        return false;
+    }
+
+    if (data->type != BT_DATA_UUID16_SOME && data->type != BT_DATA_UUID16_ALL) {
+        return true;
+    }
+
+    for (size_t i = 0; i + 1 < data->data_len; i += 2) {
+        uint16_t uuid16 = sys_get_le16(&data->data[i]);
+        if (uuid16 == BT_UUID_HIDS_VAL) {
+            *found = true;
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool ad_contains_hids_uuid(const struct net_buf_simple *ad) {
+    struct net_buf_simple ad_copy = *ad;
+    bool found = false;
+
+    bt_data_parse(&ad_copy, ad_find_hids_uuid_cb, &found);
+    return found;
+}
+
 static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
                     struct net_buf_simple *ad) {
     int err;
     char addr_str[BT_ADDR_LE_STR_LEN];
-
-    ARG_UNUSED(ad);
 
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_SCAN_EVENTS)) {
         bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
@@ -569,6 +599,12 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
     }
 
     if (!bt_addr_eq(&addr->a, &target_addr.a)) {
+        return;
+    }
+
+    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_REQUIRE_HIDS_IN_ADV) &&
+        !ad_contains_hids_uuid(ad)) {
+        LOG_DBG("Target seen without HIDS UUID in AD type=%u, skip", adv_type);
         return;
     }
 

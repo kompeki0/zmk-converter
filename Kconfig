@@ -36,6 +36,15 @@ config ZMK_BLE_HOGP_SNIFFER_LOG_SCAN_EVENTS
     help
       Log every received advertising packet address/type/RSSI while scanning.
 
+config ZMK_BLE_HOGP_SNIFFER_REQUIRE_HIDS_IN_ADV
+    bool "Require HID service UUID (0x1812) in advertising data before connect"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    default y
+    help
+      Only connect when the target MAC packet contains HID Service UUID
+      (0x1812) in UUID16 AD fields. This helps avoid connecting to split-side
+      non-HID endpoints that share nearby traffic.
+
 config ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS
     bool "Forward keyboard usages as ZMK key events"
     depends on ZMK_BLE_HOGP_SNIFFER
