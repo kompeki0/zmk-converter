@@ -40,6 +40,7 @@ struct hogp_proxy_kscan_data {
 };
 
 static struct hogp_proxy_kscan_data *g_inst;
+int zmk_hogp_proxy_kscan_inject(uint16_t row, uint16_t col, bool pressed);
 
 static void hogp_proxy_gpio_cb(const struct device *port, struct gpio_callback *cb, uint32_t pins) {
     ARG_UNUSED(port);
