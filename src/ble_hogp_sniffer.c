@@ -30,8 +30,7 @@ LOG_MODULE_REGISTER(ble_hogp_sniffer, CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_LEVEL);
 #define MAX_REPORT_SUBSCRIPTIONS 6
 #define MAX_SCAN_CANDIDATES 12
 #define CONSUMER_SLOT_BASE 104
-#define CONSUMER_SLOT_COUNT 8
-#define CONSUMER_BITS_12B 88
+#define CONSUMER_SLOT_COUNT 10
 
 static struct bt_conn *default_conn;
 static struct bt_gatt_discover_params discover_params;
@@ -80,7 +79,6 @@ static uint8_t prev_usages[MAX_PRESSED_USAGES];
 static size_t prev_usage_count;
 static uint8_t prev_consumer_slots[CONSUMER_SLOT_COUNT];
 static size_t prev_consumer_slot_count;
-static int8_t consumer_bit_to_slot[CONSUMER_BITS_12B];
 
 static int start_scan(void);
 static int connect_to_candidate(const bt_addr_le_t *addr);
@@ -270,32 +268,31 @@ static void append_slot_unique(uint8_t *slots, size_t *count, uint8_t slot) {
     slots[(*count)++] = slot;
 }
 
-static int allocate_consumer_slot_for_bit(uint8_t bit_index) {
-    if (bit_index >= CONSUMER_BITS_12B) {
-        return -EINVAL;
+static int consumer_usage_to_slot(uint16_t usage) {
+    switch (usage) {
+    case 0x00EA: /* Volume Down */
+        return 0;
+    case 0x00E9: /* Volume Up */
+        return 1;
+    case 0x00E2: /* Mute */
+        return 2;
+    case 0x00B6: /* Scan Previous Track */
+        return 3;
+    case 0x00CD: /* Play/Pause */
+        return 4;
+    case 0x00B5: /* Scan Next Track */
+        return 5;
+    case 0x00B7: /* Stop */
+        return 6;
+    case 0x006F: /* Brightness Increment */
+        return 7;
+    case 0x0070: /* Brightness Decrement */
+        return 8;
+    case 0x00F8: /* Mic Mute (commonly used by PC keyboards) */
+        return 9;
+    default:
+        return -ENOENT;
     }
-
-    if (consumer_bit_to_slot[bit_index] >= 0) {
-        return consumer_bit_to_slot[bit_index];
-    }
-
-    bool used[CONSUMER_SLOT_COUNT] = {0};
-    for (uint8_t i = 0; i < CONSUMER_BITS_12B; i++) {
-        if (consumer_bit_to_slot[i] >= 0 && consumer_bit_to_slot[i] < CONSUMER_SLOT_COUNT) {
-            used[(uint8_t)consumer_bit_to_slot[i]] = true;
-        }
-    }
-
-    for (uint8_t slot = 0; slot < CONSUMER_SLOT_COUNT; slot++) {
-        if (!used[slot]) {
-            consumer_bit_to_slot[bit_index] = (int8_t)slot;
-            LOG_INF("Mapped consumer bit %u -> slot %u (position %u)", bit_index, slot,
-                    (uint16_t)(CONSUMER_SLOT_BASE + slot));
-            return slot;
-        }
-    }
-
-    return -ENOMEM;
 }
 
 static void build_consumer_slots_from_12byte_report(const uint8_t *report, size_t report_len,
@@ -305,22 +302,20 @@ static void build_consumer_slots_from_12byte_report(const uint8_t *report, size_
         return;
     }
 
-    for (uint8_t byte_idx = 1; byte_idx < 12U; byte_idx++) {
-        uint8_t b = report[byte_idx];
-        if (b == 0U) {
+    /* Format seen on target: 12-byte array of 16-bit consumer usages. */
+    for (uint8_t i = 0; i < 6U; i++) {
+        uint16_t usage = sys_get_le16(&report[i * 2U]);
+        int slot;
+
+        if (usage == 0U) {
             continue;
         }
 
-        for (uint8_t bit = 0; bit < 8U; bit++) {
-            if (!(b & BIT(bit))) {
-                continue;
-            }
-
-            uint8_t bit_index = (uint8_t)(((byte_idx - 1U) * 8U) + bit);
-            int slot = allocate_consumer_slot_for_bit(bit_index);
-            if (slot >= 0) {
-                append_slot_unique(slots, count, (uint8_t)slot);
-            }
+        slot = consumer_usage_to_slot(usage);
+        if (slot >= 0) {
+            append_slot_unique(slots, count, (uint8_t)slot);
+        } else {
+            LOG_DBG("Unsupported consumer usage 0x%04x", usage);
         }
     }
 }
@@ -1096,7 +1091,6 @@ static int ble_hogp_sniffer_init(void) {
         return err;
     }
 
-    memset(consumer_bit_to_slot, -1, sizeof(consumer_bit_to_slot));
     prev_consumer_slot_count = 0;
     memset(prev_consumer_slots, 0, sizeof(prev_consumer_slots));
     target_hid_verified = false;

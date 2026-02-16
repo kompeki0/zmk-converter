@@ -43,9 +43,10 @@
                 &kp KP_N1    &kp KP_N2     &kp KP_N3       &kp KP_ENTER
                 &kp KP_N0    &kp KP_DOT
 
-                /* 104..111: consumer proxy slots from 12-byte report */
+                /* 104..113: consumer proxy slots from 12-byte report */
                 &kp C_VOL_DN &kp C_VOL_UP &kp C_MUTE &kp C_PREV
                 &kp C_PP     &kp C_NEXT   &kp C_STOP &kp C_BRI_UP
+                &kp C_BRI_DN &kp C_MUTE
             >;
         };
 
@@ -77,8 +78,8 @@
                 /* 87..103 */
                 &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans
 
-                /* 104..111 */
-                &trans &trans &trans &trans &trans &trans &trans &trans
+                /* 104..113 */
+                &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans
             >;
         };
 
@@ -122,9 +123,10 @@
                 &kp KP_N1    &kp KP_N2     &kp KP_N3       &kp KP_ENTER
                 &kp KP_N0    &kp KP_DOT
 
-                /* 104..111 */
+                /* 104..113 */
                 &kp C_VOL_DN &kp C_VOL_UP &kp C_MUTE &kp C_PREV
                 &kp C_PP     &kp C_NEXT   &kp C_STOP &kp C_BRI_UP
+                &kp C_BRI_DN &kp C_MUTE
             >;
         };
     };

@@ -4,12 +4,12 @@
     hogp_kscan: hogp_kscan {
         compatible = "zmk,kscan-hogp-proxy";
         rows = <1>;
-        columns = <112>;
+        columns = <114>;
     };
 
     default_transform: keymap_transform0 {
         compatible = "zmk,matrix-transform";
-        columns = <112>;
+        columns = <114>;
         rows = <1>;
         map = <
             RC(0,0)  RC(0,1)  RC(0,2)  RC(0,3)  RC(0,4)  RC(0,5)  RC(0,6)  RC(0,7)  RC(0,8)
@@ -24,7 +24,7 @@
             RC(0,81) RC(0,82) RC(0,83) RC(0,84) RC(0,85) RC(0,86) RC(0,87) RC(0,88) RC(0,89)
             RC(0,90) RC(0,91) RC(0,92) RC(0,93) RC(0,94) RC(0,95) RC(0,96) RC(0,97) RC(0,98)
             RC(0,99) RC(0,100) RC(0,101) RC(0,102) RC(0,103) RC(0,104) RC(0,105) RC(0,106)
-            RC(0,107) RC(0,108) RC(0,109) RC(0,110) RC(0,111)
+            RC(0,107) RC(0,108) RC(0,109) RC(0,110) RC(0,111) RC(0,112) RC(0,113)
         >;
     };
 
