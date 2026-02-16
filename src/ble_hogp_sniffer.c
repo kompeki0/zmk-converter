@@ -57,6 +57,7 @@ static struct k_work_delayable sniffer_start_work;
 static struct k_work_delayable reconnect_work;
 static struct k_work_delayable scan_cycle_work;
 static struct k_work_delayable candidate_connect_work;
+static struct k_work_delayable picker_probe_timeout_work;
 static struct k_work picker_button_work;
 K_MSGQ_DEFINE(picker_button_msgq, sizeof(uint8_t), 16, 4);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT) &&                                \
@@ -84,10 +85,17 @@ static int64_t next_connect_allowed_ms;
 static uint8_t report_sub_count;
 static uint16_t pending_report_char_handle;
 static uint16_t pending_report_value_handle;
+static struct bt_gatt_read_params picker_name_read_params;
+static bool picker_name_probe_active;
+static uint8_t picker_probe_indices[MAX_PICKER_DEVICES];
+static uint8_t picker_probe_count;
+static uint8_t picker_probe_pos;
+static int picker_probe_current_idx;
 
 static struct bt_uuid_16 hids_uuid = BT_UUID_INIT_16(BT_UUID_HIDS_VAL);
 static struct bt_uuid_16 report_uuid = BT_UUID_INIT_16(BT_UUID_HIDS_REPORT_VAL);
 static struct bt_uuid_16 ccc_uuid = BT_UUID_INIT_16(BT_UUID_GATT_CCC_VAL);
+static struct bt_uuid_16 gap_device_name_uuid = BT_UUID_INIT_16(BT_UUID_GAP_DEVICE_NAME_VAL);
 static const struct bt_le_conn_param target_conn_param = {
     .interval_min = 24, /* 30ms */
     .interval_max = 40, /* 50ms */
@@ -119,6 +127,12 @@ static bool should_wait_for_host(void);
 static bool host_ready_for_target_scan(void);
 static bool ad_contains_hids_uuid(const struct net_buf_simple *ad);
 static bool ad_contains_split_service_uuid(const struct net_buf_simple *ad);
+static bool picker_name_is_unknown(const char *name);
+static void picker_begin_name_probe(void);
+static void picker_try_next_name_probe(void);
+static uint8_t picker_name_read_cb(struct bt_conn *conn, uint8_t err, struct bt_gatt_read_params *params,
+                                   const void *data, uint16_t length);
+static void picker_probe_timeout_work_handler(struct k_work *work);
 static int resume_report_discovery(struct bt_conn *conn, uint16_t next_start_handle);
 static uint8_t discover_report_cb(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                                   struct bt_gatt_discover_params *params);
@@ -126,6 +140,8 @@ static void picker_button_work_handler(struct k_work *work);
 static int save_persisted_target_addr(const bt_addr_le_t *addr);
 static int load_persisted_target_addr(bt_addr_le_t *addr, bool *valid);
 static void clear_all_bonds_cb(const struct bt_bond_info *info, void *user_data);
+static const char *hci_reason_to_str(uint8_t reason);
+static const char *sec_err_to_str(enum bt_security_err err);
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 static void emit_usage_state(uint8_t usage, bool pressed);
@@ -248,6 +264,124 @@ static bool usage_exists(const uint8_t *usages, size_t count, uint8_t usage) {
     }
 
     return false;
+}
+
+static const char *hci_reason_to_str(uint8_t reason) {
+    switch (reason) {
+#ifdef BT_HCI_ERR_UNKNOWN_CONN_ID
+    case BT_HCI_ERR_UNKNOWN_CONN_ID:
+        return "unknown_conn_id";
+#endif
+#ifdef BT_HCI_ERR_AUTH_FAIL
+    case BT_HCI_ERR_AUTH_FAIL:
+        return "auth_fail";
+#endif
+#ifdef BT_HCI_ERR_PIN_OR_KEY_MISSING
+    case BT_HCI_ERR_PIN_OR_KEY_MISSING:
+        return "pin_or_key_missing";
+#endif
+#ifdef BT_HCI_ERR_CONN_TIMEOUT
+    case BT_HCI_ERR_CONN_TIMEOUT:
+        return "conn_timeout";
+#endif
+#ifdef BT_HCI_ERR_CONN_LIMIT_EXCEEDED
+    case BT_HCI_ERR_CONN_LIMIT_EXCEEDED:
+        return "conn_limit_exceeded";
+#endif
+#ifdef BT_HCI_ERR_CONN_FAIL_TO_ESTAB
+    case BT_HCI_ERR_CONN_FAIL_TO_ESTAB:
+        return "conn_fail_to_estab";
+#endif
+#ifdef BT_HCI_ERR_REMOTE_USER_TERM_CONN
+    case BT_HCI_ERR_REMOTE_USER_TERM_CONN:
+        return "remote_user_term";
+#endif
+#ifdef BT_HCI_ERR_REMOTE_LOW_RESOURCES
+    case BT_HCI_ERR_REMOTE_LOW_RESOURCES:
+        return "remote_low_resources";
+#endif
+#ifdef BT_HCI_ERR_REMOTE_POWER_OFF
+    case BT_HCI_ERR_REMOTE_POWER_OFF:
+        return "remote_power_off";
+#endif
+#ifdef BT_HCI_ERR_UNSUPP_REMOTE_FEATURE
+    case BT_HCI_ERR_UNSUPP_REMOTE_FEATURE:
+        return "unsupported_remote_feature";
+#endif
+#ifdef BT_HCI_ERR_PAIRING_NOT_SUPPORTED
+    case BT_HCI_ERR_PAIRING_NOT_SUPPORTED:
+        return "pairing_not_supported";
+#endif
+#ifdef BT_HCI_ERR_UNACCEPT_CONN_PARAM
+    case BT_HCI_ERR_UNACCEPT_CONN_PARAM:
+        return "unacceptable_conn_param";
+#endif
+#ifdef BT_HCI_ERR_ADV_TIMEOUT
+    case BT_HCI_ERR_ADV_TIMEOUT:
+        return "adv_timeout";
+#endif
+#ifdef BT_HCI_ERR_TERM_DUE_TO_MIC_FAIL
+    case BT_HCI_ERR_TERM_DUE_TO_MIC_FAIL:
+        return "mic_fail";
+#endif
+    default:
+        return "unknown";
+    }
+}
+
+static const char *sec_err_to_str(enum bt_security_err err) {
+    switch (err) {
+#ifdef BT_SECURITY_ERR_SUCCESS
+    case BT_SECURITY_ERR_SUCCESS:
+        return "success";
+#endif
+#ifdef BT_SECURITY_ERR_AUTH_FAIL
+    case BT_SECURITY_ERR_AUTH_FAIL:
+        return "auth_fail";
+#endif
+#ifdef BT_SECURITY_ERR_PIN_OR_KEY_MISSING
+    case BT_SECURITY_ERR_PIN_OR_KEY_MISSING:
+        return "pin_or_key_missing";
+#endif
+#ifdef BT_SECURITY_ERR_OOB_NOT_AVAILABLE
+    case BT_SECURITY_ERR_OOB_NOT_AVAILABLE:
+        return "oob_not_available";
+#endif
+#ifdef BT_SECURITY_ERR_AUTH_REQUIREMENT
+    case BT_SECURITY_ERR_AUTH_REQUIREMENT:
+        return "auth_requirement";
+#endif
+#ifdef BT_SECURITY_ERR_PAIR_NOT_SUPPORTED
+    case BT_SECURITY_ERR_PAIR_NOT_SUPPORTED:
+        return "pair_not_supported";
+#endif
+#ifdef BT_SECURITY_ERR_PAIR_NOT_ALLOWED
+    case BT_SECURITY_ERR_PAIR_NOT_ALLOWED:
+        return "pair_not_allowed";
+#endif
+#ifdef BT_SECURITY_ERR_INVALID_PARAM
+    case BT_SECURITY_ERR_INVALID_PARAM:
+        return "invalid_param";
+#endif
+#ifdef BT_SECURITY_ERR_UNSPECIFIED
+    case BT_SECURITY_ERR_UNSPECIFIED:
+        return "unspecified";
+#endif
+#ifdef BT_SECURITY_ERR_CONFIRM_VALUE_FAILED
+    case BT_SECURITY_ERR_CONFIRM_VALUE_FAILED:
+        return "confirm_value_failed";
+#endif
+#ifdef BT_SECURITY_ERR_PAIRING_IN_PROGRESS
+    case BT_SECURITY_ERR_PAIRING_IN_PROGRESS:
+        return "pairing_in_progress";
+#endif
+#ifdef BT_SECURITY_ERR_CROSS_TRANSP_NOT_ALLOWED
+    case BT_SECURITY_ERR_CROSS_TRANSP_NOT_ALLOWED:
+        return "cross_transport_not_allowed";
+#endif
+    default:
+        return "unknown";
+    }
 }
 
 static void append_usage_unique(uint8_t *usages, size_t *count, uint8_t usage) {
@@ -507,7 +641,11 @@ static int picker_find_index_by_addr(const bt_addr_le_t *addr) {
     return -ENOENT;
 }
 
-static uint8_t picker_item_count(void) { return (uint8_t)(picker_device_count + 1U); }
+static bool picker_name_is_unknown(const char *name) {
+    return (name == NULL || name[0] == '\0' || strncmp(name, "UNK", 3) == 0);
+}
+
+static uint8_t picker_item_count(void) { return (uint8_t)(picker_device_count + 2U); }
 
 static void picker_announce_current(const char *prefix) {
     char buf[48];
@@ -526,8 +664,17 @@ static void picker_announce_current(const char *prefix) {
         return;
     }
 
+    if (picker_selected_index == 1U) {
+        snprintf(buf, sizeof(buf), "%s 1 OTHER", prefix);
+        LOG_INF("%s", buf);
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+        type_text_line(buf);
+#endif
+        return;
+    }
+
     snprintf(buf, sizeof(buf), "%s %u %s", prefix, (uint32_t)picker_selected_index,
-             picker_devices[picker_selected_index - 1U].name);
+             picker_devices[picker_selected_index - 2U].name);
     LOG_INF("%s", buf);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     type_text_line(buf);
@@ -604,6 +751,77 @@ static void picker_add_or_update(const bt_addr_le_t *addr, const char *name, int
     LOG_INF("Found candidate %u: %s (rssi=%d)", (uint8_t)(picker_device_count + 1U),
             picker_devices[picker_device_count].name, rssi);
     picker_device_count++;
+}
+
+static void picker_try_next_name_probe(void) {
+    if (!picker_name_probe_active) {
+        return;
+    }
+
+    while (picker_probe_pos < picker_probe_count) {
+        int idx = (int)picker_probe_indices[picker_probe_pos++];
+
+        if (idx < 0 || idx >= picker_device_count) {
+            continue;
+        }
+
+        picker_probe_current_idx = idx;
+        bt_addr_le_copy(&target_addr, &picker_devices[idx].addr);
+        selected_target_valid = true;
+        target_any_addr = false;
+        target_match_any_type = true;
+        target_hid_verified = false;
+        reconnect_fail_count = 0;
+        in_candidate_sequence = false;
+        candidate_count = 0;
+        candidate_index = 0;
+        memset(candidate_addrs, 0, sizeof(candidate_addrs));
+
+        if (scanning) {
+            int serr = bt_le_scan_stop();
+            if (serr && serr != -EALREADY) {
+                LOG_WRN("Scan stop before probe failed (%d)", serr);
+            }
+            scanning = false;
+        }
+
+        LOG_INF("name probe connect %u/%u", picker_probe_pos, picker_probe_count);
+        if (connect_to_candidate(&target_addr)) {
+            picker_try_next_name_probe();
+        }
+        return;
+    }
+
+    picker_name_probe_active = false;
+    picker_probe_count = 0;
+    picker_probe_pos = 0;
+    picker_probe_current_idx = -1;
+    selected_target_valid = false;
+    target_hid_verified = false;
+    picker_selected_index = 1U;
+    picker_announce_current("other done");
+    (void)start_scan();
+}
+
+static void picker_begin_name_probe(void) {
+    picker_probe_count = 0;
+    picker_probe_pos = 0;
+    picker_probe_current_idx = -1;
+
+    for (uint8_t i = 0; i < picker_device_count && picker_probe_count < MAX_PICKER_DEVICES; i++) {
+        if (picker_name_is_unknown(picker_devices[i].name)) {
+            picker_probe_indices[picker_probe_count++] = i;
+        }
+    }
+
+    if (picker_probe_count == 0U) {
+        picker_announce_current("other none");
+        return;
+    }
+
+    picker_name_probe_active = true;
+    picker_announce_current("other probe");
+    picker_try_next_name_probe();
 }
 
 static int settings_set_target_addr(const char *name, size_t len_rd, settings_read_cb read_cb,
@@ -997,6 +1215,7 @@ static int discover_hids(struct bt_conn *conn) {
 
 static void connected_cb(struct bt_conn *conn, uint8_t err) {
     int derr;
+    bt_security_t wanted_sec = (bt_security_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_SECURITY_LEVEL;
     const bt_addr_le_t *peer = bt_conn_get_dst(conn);
     struct bt_conn_info info = {0};
     bool is_peripheral = (bt_conn_get_info(conn, &info) == 0 && info.role == BT_CONN_ROLE_PERIPHERAL);
@@ -1015,7 +1234,7 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     connecting = false;
 
     if (err) {
-        LOG_ERR("Connection failed (err 0x%02x)", err);
+        LOG_ERR("Connection failed (err 0x%02x: %s)", err, hci_reason_to_str(err));
         if (err == BT_HCI_ERR_CONN_FAIL_TO_ESTAB || err == BT_HCI_ERR_UNKNOWN_CONN_ID) {
             next_connect_allowed_ms = k_uptime_get() + 5000;
         }
@@ -1027,6 +1246,10 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
         if (reconnect_fail_count < UINT8_MAX) {
             reconnect_fail_count++;
         }
+        if (picker_name_probe_active) {
+            picker_try_next_name_probe();
+            return;
+        }
         (void)try_next_candidate_or_rescan();
         return;
     }
@@ -1036,6 +1259,24 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     screen_log_target_addr("target connected", peer);
     screen_log_verbose_text("conn ok");
 #endif
+    if (picker_name_probe_active) {
+        memset(&picker_name_read_params, 0, sizeof(picker_name_read_params));
+        picker_name_read_params.func = picker_name_read_cb;
+        picker_name_read_params.handle_count = 0U;
+        picker_name_read_params.by_uuid.start_handle = 0x0001U;
+        picker_name_read_params.by_uuid.end_handle = 0xFFFFU;
+        picker_name_read_params.by_uuid.uuid = &gap_device_name_uuid.uuid;
+
+        derr = bt_gatt_read(conn, &picker_name_read_params);
+        if (derr) {
+            LOG_WRN("name probe bt_gatt_read failed (%d)", derr);
+            (void)bt_conn_disconnect(default_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+        } else {
+            k_work_schedule(&picker_probe_timeout_work, K_MSEC(1500));
+        }
+        return;
+    }
+
     if (peer) {
         target_addr = *peer;
         selected_target_valid = true;
@@ -1057,8 +1298,10 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
         LOG_INF("Requested stable conn params (30-50ms, lat=0, timeout=8s)");
     }
 
-    derr = bt_conn_set_security(conn, BT_SECURITY_L2);
+    LOG_INF("Requesting security L%u", (uint32_t)wanted_sec);
+    derr = bt_conn_set_security(conn, wanted_sec);
     if (derr == -EALREADY) {
+        LOG_INF("Security already satisfied (L%u)", (uint32_t)wanted_sec);
         gatt_discovery_started = true;
         derr = discover_hids(conn);
         if (derr) {
@@ -1105,7 +1348,7 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
         return;
     }
 
-    LOG_INF("Disconnected (reason 0x%02x)", reason);
+    LOG_INF("Disconnected (reason 0x%02x: %s)", reason, hci_reason_to_str(reason));
     if (reason == BT_HCI_ERR_CONN_FAIL_TO_ESTAB || reason == BT_HCI_ERR_REMOTE_USER_TERM_CONN ||
         reason == BT_HCI_ERR_CONN_TIMEOUT) {
         next_connect_allowed_ms = k_uptime_get() + 5000;
@@ -1144,25 +1387,38 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
     if (reconnect_fail_count < UINT8_MAX) {
         reconnect_fail_count++;
     }
+
+    if (picker_name_probe_active) {
+        k_work_cancel_delayable(&picker_probe_timeout_work);
+        picker_try_next_name_probe();
+        return;
+    }
+
     (void)try_next_candidate_or_rescan();
 }
 
 static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum bt_security_err err) {
     int derr;
+    bt_security_t wanted_sec = (bt_security_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_SECURITY_LEVEL;
 
     if (conn != default_conn) {
         return;
     }
 
     if (err) {
-        LOG_WRN("Security changed failed (level %u, err %d)", level, err);
+        LOG_WRN("Security changed failed (level %u, err %d: %s)", (uint32_t)level, (int)err,
+                sec_err_to_str(err));
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
         screen_log_verbose_code("sec err", (uint32_t)err);
 #endif
         return;
     }
 
-    if (level < BT_SECURITY_L2 || gatt_discovery_started) {
+    if (level < wanted_sec || gatt_discovery_started) {
+        if (level < wanted_sec) {
+            LOG_WRN("Security level insufficient: got L%u want L%u", (uint32_t)level,
+                    (uint32_t)wanted_sec);
+        }
         return;
     }
 
@@ -1179,6 +1435,23 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
 #endif
     }
 }
+
+static void pairing_complete_cb(struct bt_conn *conn, bool bonded) {
+    ARG_UNUSED(conn);
+    LOG_INF("Pairing complete (bonded=%u)", bonded ? 1U : 0U);
+}
+
+static void pairing_failed_cb(struct bt_conn *conn, enum bt_security_err reason) {
+    ARG_UNUSED(conn);
+    LOG_WRN("Pairing failed (reason=%d: %s)", (int)reason, sec_err_to_str(reason));
+}
+
+#if defined(CONFIG_BT_SMP)
+static struct bt_conn_auth_info_cb auth_info_cb = {
+    .pairing_complete = pairing_complete_cb,
+    .pairing_failed = pairing_failed_cb,
+};
+#endif
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
     .connected = connected_cb,
@@ -1322,9 +1595,11 @@ static bool candidate_list_contains(const bt_addr_le_t *addr) {
 
 static int start_scan(void) {
     int err;
-    static const struct bt_le_scan_param scan_param = {
+    struct bt_le_scan_param scan_param = {
         .type = BT_LE_SCAN_TYPE_ACTIVE,
-        .options = BT_LE_SCAN_OPT_NONE,
+        .options = IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_SCAN_FILTER_DUPLICATE)
+                       ? BT_LE_SCAN_OPT_FILTER_DUPLICATE
+                       : BT_LE_SCAN_OPT_NONE,
         .interval = BT_GAP_SCAN_FAST_INTERVAL,
         .window = BT_GAP_SCAN_FAST_WINDOW,
     };
@@ -1354,7 +1629,9 @@ static int start_scan(void) {
 
     scanning = true;
     k_work_schedule(&scan_cycle_work, K_MSEC(CONFIG_ZMK_BLE_HOGP_SNIFFER_SCAN_CYCLE_MS));
-    LOG_INF("Scanning started (cycle=%d ms)", CONFIG_ZMK_BLE_HOGP_SNIFFER_SCAN_CYCLE_MS);
+    LOG_INF("Scanning started (cycle=%d ms, dup_filter=%u)",
+            CONFIG_ZMK_BLE_HOGP_SNIFFER_SCAN_CYCLE_MS,
+            IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_SCAN_FILTER_DUPLICATE) ? 1U : 0U);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     screen_log_verbose_text("scan start");
 #endif
@@ -1383,6 +1660,58 @@ static int connect_to_candidate(const bt_addr_le_t *addr) {
     }
 
     return 0;
+}
+
+static uint8_t picker_name_read_cb(struct bt_conn *conn, uint8_t err, struct bt_gatt_read_params *params,
+                                   const void *data, uint16_t length) {
+    ARG_UNUSED(params);
+
+    if (!picker_name_probe_active || conn != default_conn) {
+        return BT_GATT_ITER_STOP;
+    }
+
+    if (!err && data && length > 0 && picker_probe_current_idx >= 0 &&
+        picker_probe_current_idx < picker_device_count) {
+        char name[PICKER_NAME_MAX];
+        size_t n = MIN((size_t)length, sizeof(name) - 1U);
+
+        memcpy(name, data, n);
+        name[n] = '\0';
+        for (size_t i = 0; i < n; i++) {
+            uint8_t c = (uint8_t)name[i];
+            if (!is_ascii_alnum(c)) {
+                name[i] = 'x';
+            }
+        }
+
+        if (name[0] != '\0') {
+            strncpy(picker_devices[picker_probe_current_idx].name, name,
+                    sizeof(picker_devices[picker_probe_current_idx].name) - 1U);
+            picker_devices[picker_probe_current_idx].name
+                [sizeof(picker_devices[picker_probe_current_idx].name) - 1U] = '\0';
+            LOG_INF("name probe ok: %s", picker_devices[picker_probe_current_idx].name);
+        }
+    } else {
+        LOG_WRN("name probe read failed (%u)", err);
+    }
+
+    if (default_conn) {
+        (void)bt_conn_disconnect(default_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+    }
+    return BT_GATT_ITER_STOP;
+}
+
+static void picker_probe_timeout_work_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+
+    if (!picker_name_probe_active) {
+        return;
+    }
+
+    if (default_conn) {
+        LOG_WRN("name probe timeout");
+        (void)bt_conn_disconnect(default_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+    }
 }
 
 static void candidate_connect_work_handler(struct k_work *work) {
@@ -1593,6 +1922,11 @@ static void picker_button_work_handler(struct k_work *work) {
                 bt_foreach_bond(BT_ID_DEFAULT, clear_all_bonds_cb, NULL);
                 (void)settings_delete("ble_hogp_sniffer/target_addr");
 
+                picker_name_probe_active = false;
+                picker_probe_count = 0;
+                picker_probe_pos = 0;
+                picker_probe_current_idx = -1;
+                k_work_cancel_delayable(&picker_probe_timeout_work);
                 selected_target_valid = false;
                 target_any_addr = false;
                 target_hid_verified = false;
@@ -1614,12 +1948,21 @@ static void picker_button_work_handler(struct k_work *work) {
                 break;
             }
 
+            if (picker_selected_index == 1U) {
+                if (default_conn || connecting) {
+                    picker_announce_current("busy");
+                    break;
+                }
+                picker_begin_name_probe();
+                break;
+            }
+
             if (default_conn || connecting) {
                 picker_announce_current("busy");
                 break;
             }
 
-            bt_addr_le_copy(&target_addr, &picker_devices[picker_selected_index - 1U].addr);
+            bt_addr_le_copy(&target_addr, &picker_devices[picker_selected_index - 2U].addr);
             selected_target_valid = true;
             target_any_addr = false;
             target_match_any_type = true;
@@ -1636,6 +1979,11 @@ static void picker_button_work_handler(struct k_work *work) {
             break;
 
         case 3: /* Back */
+            picker_name_probe_active = false;
+            picker_probe_count = 0;
+            picker_probe_pos = 0;
+            picker_probe_current_idx = -1;
+            k_work_cancel_delayable(&picker_probe_timeout_work);
             selected_target_valid = false;
             target_hid_verified = false;
             in_candidate_sequence = false;
@@ -1733,6 +2081,13 @@ static int ble_hogp_sniffer_init(void) {
         return err;
     }
 
+#if defined(CONFIG_BT_SMP)
+    err = bt_conn_auth_info_cb_register(&auth_info_cb);
+    if (err && err != -EALREADY) {
+        LOG_WRN("bt_conn_auth_info_cb_register failed (%d)", err);
+    }
+#endif
+
     /* Ensure host advertising state machine is nudged at boot. */
     (void)zmk_ble_set_device_name((char *)CONFIG_BT_DEVICE_NAME);
 
@@ -1766,6 +2121,10 @@ static int ble_hogp_sniffer_init(void) {
     memset(prev_consumer_slots, 0, sizeof(prev_consumer_slots));
     target_hid_verified = false;
     next_connect_allowed_ms = 0;
+    picker_name_probe_active = false;
+    picker_probe_count = 0;
+    picker_probe_pos = 0;
+    picker_probe_current_idx = -1;
 
     (void)clear_non_target_bonds();
     apply_host_adv_policy(should_wait_for_host() ? true : false);
@@ -1790,6 +2149,7 @@ static int ble_hogp_sniffer_schedule_init(void) {
     k_work_init_delayable(&reconnect_work, reconnect_work_handler);
     k_work_init_delayable(&scan_cycle_work, scan_cycle_work_handler);
     k_work_init_delayable(&candidate_connect_work, candidate_connect_work_handler);
+    k_work_init_delayable(&picker_probe_timeout_work, picker_probe_timeout_work_handler);
     k_work_init(&picker_button_work, picker_button_work_handler);
     k_work_init_delayable(&sniffer_start_work, sniffer_start_work_handler);
     k_work_schedule(&sniffer_start_work, K_SECONDS(3));

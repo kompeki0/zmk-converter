@@ -63,6 +63,14 @@ config ZMK_BLE_HOGP_SNIFFER_SCAN_CYCLE_MS
       Duration of one scan cycle. During this period, matching candidates are
       collected and the connection attempt is made after the cycle ends.
 
+config ZMK_BLE_HOGP_SNIFFER_SCAN_FILTER_DUPLICATE
+    bool "Enable duplicate filtering during scan"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    default n
+    help
+      If enabled, controller-side duplicate filtering is used while scanning.
+      Keep disabled when troubleshooting missing candidates.
+
 config ZMK_BLE_HOGP_SNIFFER_NEXT_CONNECT_DELAY_MS
     int "Delay before trying next candidate after disconnect (ms)"
     depends on ZMK_BLE_HOGP_SNIFFER
@@ -72,6 +80,16 @@ config ZMK_BLE_HOGP_SNIFFER_NEXT_CONNECT_DELAY_MS
       Wait time before next connection attempt when stepping through
       candidates after disconnect/failure. Helps avoid bt_conn_le_create
       failing while the previous link is still tearing down.
+
+config ZMK_BLE_HOGP_SNIFFER_SECURITY_LEVEL
+    int "Requested BLE security level for target link"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    range 1 4
+    default 2
+    help
+      Requested security level passed to bt_conn_set_security():
+      1=unencrypted, 2=encrypted, 3=encrypted+MITM, 4=LE Secure Connections.
+      If a target rejects higher levels, lower this to improve first-pair success.
 
 config ZMK_BLE_HOGP_SNIFFER_SINGLE_TARGET_ONLY
     bool "After HID is verified, reconnect only to the single target"
