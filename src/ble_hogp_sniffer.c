@@ -85,6 +85,7 @@ static int64_t next_connect_allowed_ms;
 static uint8_t report_sub_count;
 static uint16_t pending_report_char_handle;
 static uint16_t pending_report_value_handle;
+static bool target_ready_announced;
 static struct bt_gatt_read_params picker_name_read_params;
 static bool picker_name_probe_active;
 static bt_addr_le_t picker_unknown_addrs[MAX_PICKER_DEVICES];
@@ -330,6 +331,9 @@ static const char *hci_reason_to_str(uint8_t reason) {
         return "mic_fail";
 #endif
     default:
+        if (reason == 22U) {
+            return "local_host_term";
+        }
         return "unknown";
     }
 }
@@ -385,6 +389,12 @@ static const char *sec_err_to_str(enum bt_security_err err) {
         return "cross_transport_not_allowed";
 #endif
     default:
+        if ((int)err == 4) {
+            return "auth_requirement";
+        }
+        if ((int)err == 5) {
+            return "pair_not_supported";
+        }
         return "unknown";
     }
 }
@@ -703,7 +713,7 @@ static void picker_announce_current(const char *prefix) {
     }
 
     if (picker_selected_index == 1U) {
-        snprintf(buf, sizeof(buf), "%s 1 OTHER", prefix);
+        snprintf(buf, sizeof(buf), "%s 1 OTHER(%u)", prefix, (uint32_t)picker_unknown_count);
         LOG_INF("%s", buf);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
         type_text_line(buf);
@@ -1088,6 +1098,13 @@ static uint8_t notify_cb(struct bt_conn *conn, struct bt_gatt_subscribe_params *
     LOG_INF("HID Input notify: sub=%u vh=0x%04x len=%u", sub_idx, params->value_handle, length);
     LOG_HEXDUMP_INF(data, length, "HID Input");
 
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+    if (!target_ready_announced) {
+        type_text_line("target ready");
+        target_ready_announced = true;
+    }
+#endif
+
     /* First real input means candidate-connect phase succeeded. */
     in_candidate_sequence = false;
     candidate_count = 0;
@@ -1295,6 +1312,7 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     }
 
     LOG_INF("Connected to target");
+    target_ready_announced = false;
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     screen_log_target_addr("target connected", peer);
     type_text_line("target link up");
@@ -1409,6 +1427,7 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
 
     memset(subscribe_params, 0, sizeof(subscribe_params));
     report_sub_count = 0;
+    target_ready_announced = false;
     pending_report_char_handle = 0;
     pending_report_value_handle = 0;
     prev_consumer_slot_count = 0;
@@ -1452,6 +1471,14 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
         screen_log_verbose_code("sec err", (uint32_t)err);
         type_text_line("target sec fail");
 #endif
+        if (!gatt_discovery_started) {
+            LOG_WRN("Security failed; trying HID discovery fallback");
+            gatt_discovery_started = true;
+            derr = discover_hids(conn);
+            if (derr) {
+                LOG_ERR("HID discovery fallback failed (%d)", derr);
+            }
+        }
         return;
     }
 
