@@ -367,13 +367,16 @@ static bool is_ascii_alnum(uint8_t c) {
 }
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-static bool char_to_usage(char c, uint8_t *usage) {
+static bool char_to_usage(char c, uint8_t *usage, bool *need_shift) {
+    *need_shift = false;
+
     if (c >= 'a' && c <= 'z') {
         *usage = (uint8_t)(0x04 + (c - 'a'));
         return true;
     }
     if (c >= 'A' && c <= 'Z') {
         *usage = (uint8_t)(0x04 + (c - 'A'));
+        *need_shift = true;
         return true;
     }
     if (c >= '1' && c <= '9') {
@@ -398,6 +401,16 @@ static bool char_to_usage(char c, uint8_t *usage) {
     }
     if (c == ':') {
         *usage = SEMI;
+        *need_shift = true;
+        return true;
+    }
+    if (c == '*') {
+        *usage = N8;
+        *need_shift = true;
+        return true;
+    }
+    if (c == ';') {
+        *usage = SEMI;
         return true;
     }
     return false;
@@ -410,12 +423,25 @@ static void type_text_line(const char *text) {
 
     for (size_t i = 0; text[i] != '\0'; i++) {
         uint8_t usage;
-        if (!char_to_usage(text[i], &usage)) {
+        bool need_shift;
+
+        if (!char_to_usage(text[i], &usage, &need_shift)) {
             continue;
         }
+
+        if (need_shift) {
+            emit_usage_state(LSHIFT, true);
+            k_msleep(1);
+        }
+
         emit_usage_state(usage, true);
         k_msleep(1);
         emit_usage_state(usage, false);
+
+        if (need_shift) {
+            k_msleep(1);
+            emit_usage_state(LSHIFT, false);
+        }
         k_msleep(2);
     }
     emit_usage_state(ENTER, true);
@@ -444,10 +470,12 @@ static bool ad_parse_name_cb(struct bt_data *data, void *user_data) {
 
     for (size_t i = 0; i < data->data_len && ctx->len + 1 < ctx->cap; i++) {
         uint8_t c = data->data[i];
-        if (!is_ascii_alnum(c)) {
-            continue;
+        if (is_ascii_alnum(c)) {
+            ctx->out[ctx->len++] = (char)c;
+        } else {
+            /* Keep length/shape of name while avoiding unsupported glyphs. */
+            ctx->out[ctx->len++] = '*';
         }
-        ctx->out[ctx->len++] = (char)c;
     }
     ctx->out[ctx->len] = '\0';
     ctx->found = (ctx->len > 0);
