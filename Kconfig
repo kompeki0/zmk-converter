@@ -141,6 +141,16 @@ config ZMK_BLE_HOGP_SNIFFER_BUTTON_SELECTOR
     help
       Use external buttons to choose the target keyboard from discovered
       candidate names (alnum), then connect/disconnect.
+      If disabled, the sniffer uses fixed target MAC settings
+      (CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET_MAC / ADDR_TYPE_PUBLIC).
+
+config ZMK_BLE_HOGP_SNIFFER_WAIT_FOR_HOST_BEFORE_TARGET_SCAN
+    bool "Wait host-PC connection before scanning target keyboard"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    default n
+    help
+      If enabled, keep host BLE advertising active and defer target keyboard
+      scanning until a host PC is connected to this device.
 
 endmenu
 

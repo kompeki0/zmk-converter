@@ -41,6 +41,7 @@ static struct bt_gatt_discover_params discover_params;
 static struct bt_gatt_subscribe_params subscribe_params[MAX_REPORT_SUBSCRIPTIONS];
 static bt_addr_le_t target_addr;
 static bool selected_target_valid;
+static bool target_any_addr;
 static bt_addr_le_t candidate_addrs[MAX_SCAN_CANDIDATES];
 struct picker_device {
     bt_addr_le_t addr;
@@ -75,6 +76,7 @@ static uint8_t candidate_index;
 static bool gatt_discovery_started;
 static uint8_t reconnect_fail_count;
 static bool host_adv_blocked;
+static bool host_connected;
 static bool target_hid_verified;
 static uint8_t report_sub_count;
 static uint16_t pending_report_char_handle;
@@ -103,6 +105,8 @@ static void schedule_connect_current_candidate(uint32_t delay_ms);
 static int clear_non_target_bonds(void);
 static void schedule_scan_restart(void);
 static void apply_host_adv_policy(bool target_connected);
+static bool should_wait_for_host(void);
+static bool host_ready_for_target_scan(void);
 static bool ad_contains_hids_uuid(const struct net_buf_simple *ad);
 static bool ad_contains_split_service_uuid(const struct net_buf_simple *ad);
 static int resume_report_discovery(struct bt_conn *conn, uint16_t next_start_handle);
@@ -795,8 +799,17 @@ static int discover_hids(struct bt_conn *conn) {
 
 static void connected_cb(struct bt_conn *conn, uint8_t err) {
     int derr;
+    struct bt_conn_info info = {0};
+    bool is_peripheral = (bt_conn_get_info(conn, &info) == 0 && info.role == BT_CONN_ROLE_PERIPHERAL);
 
     if (conn != default_conn) {
+        if (!err && is_peripheral) {
+            host_connected = true;
+            LOG_INF("Host PC connected");
+            if (should_wait_for_host()) {
+                (void)start_scan();
+            }
+        }
         return;
     }
 
@@ -854,7 +867,14 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
 }
 
 static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
+    struct bt_conn_info info = {0};
+    bool is_peripheral = (bt_conn_get_info(conn, &info) == 0 && info.role == BT_CONN_ROLE_PERIPHERAL);
+
     if (conn != default_conn) {
+        if (is_peripheral) {
+            host_connected = false;
+            LOG_INF("Host PC disconnected (reason 0x%02x)", reason);
+        }
         return;
     }
 
@@ -883,7 +903,7 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
     }
 #endif
     prev_usage_count = 0;
-    apply_host_adv_policy(false);
+    apply_host_adv_policy(should_wait_for_host() ? true : false);
 
     if (reconnect_fail_count < UINT8_MAX) {
         reconnect_fail_count++;
@@ -1006,7 +1026,7 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
         return;
     }
 
-    if (!selected_target_valid) {
+    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_BUTTON_SELECTOR) && !selected_target_valid) {
         if (!extract_alnum_name(ad, name, sizeof(name))) {
             return;
         }
@@ -1014,12 +1034,14 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
         return;
     }
 
-    if (addr->type != target_addr.type) {
-        return;
-    }
+    if (!target_any_addr) {
+        if (addr->type != target_addr.type) {
+            return;
+        }
 
-    if (!bt_addr_eq(&addr->a, &target_addr.a)) {
-        return;
+        if (!bt_addr_eq(&addr->a, &target_addr.a)) {
+            return;
+        }
     }
 
     if (candidate_list_contains(addr)) {
@@ -1055,6 +1077,11 @@ static int start_scan(void) {
     };
 
     if (scanning || default_conn || connecting) {
+        return 0;
+    }
+
+    if (!host_ready_for_target_scan()) {
+        LOG_INF("Waiting host PC connection before target scan");
         return 0;
     }
 
@@ -1113,7 +1140,7 @@ static void schedule_connect_current_candidate(uint32_t delay_ms) {
 }
 
 static bool try_next_candidate_or_rescan(void) {
-    if (!selected_target_valid) {
+    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_BUTTON_SELECTOR) && !selected_target_valid) {
         in_candidate_sequence = false;
         candidate_count = 0;
         candidate_index = 0;
@@ -1155,7 +1182,7 @@ static void scan_cycle_work_handler(struct k_work *work) {
         return;
     }
 
-    if (!selected_target_valid) {
+    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_BUTTON_SELECTOR) && !selected_target_valid) {
         LOG_INF("Picker scan running: devices=%u selected=%u", picker_device_count,
                 (uint8_t)(picker_selected_index + 1U));
         k_work_schedule(&scan_cycle_work, K_MSEC(CONFIG_ZMK_BLE_HOGP_SNIFFER_SCAN_CYCLE_MS));
@@ -1208,6 +1235,14 @@ static void schedule_scan_restart(void) {
 
     LOG_INF("Restart scan in %u ms (fail=%u)", delay_ms, reconnect_fail_count);
     k_work_schedule(&reconnect_work, K_MSEC(delay_ms));
+}
+
+static bool should_wait_for_host(void) {
+    return IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_WAIT_FOR_HOST_BEFORE_TARGET_SCAN);
+}
+
+static bool host_ready_for_target_scan(void) {
+    return !should_wait_for_host() || host_connected;
 }
 
 static void apply_host_adv_policy(bool target_connected) {
@@ -1291,7 +1326,7 @@ static void picker_button_work_handler(struct k_work *work) {
             memset(candidate_addrs, 0, sizeof(candidate_addrs));
 
             picker_announce_current("connect");
-            apply_host_adv_policy(false);
+            apply_host_adv_policy(should_wait_for_host() ? true : false);
 
             if (scanning) {
                 int serr = bt_le_scan_stop();
@@ -1321,7 +1356,7 @@ static void picker_button_work_handler(struct k_work *work) {
             if (default_conn) {
                 (void)bt_conn_disconnect(default_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
             } else {
-                apply_host_adv_policy(false);
+                apply_host_adv_policy(should_wait_for_host() ? true : false);
                 (void)start_scan();
             }
             break;
@@ -1359,12 +1394,22 @@ static int parse_target_addr(void) {
     const bool target_is_public = IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET_ADDR_TYPE_PUBLIC);
     bt_addr_t addr;
 
+    if (CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET_MAC[0] == '\0') {
+        target_any_addr = true;
+        selected_target_valid = true;
+        memset(&target_addr, 0, sizeof(target_addr));
+        LOG_INF("Target MAC empty: any-address connect mode enabled");
+        return 0;
+    }
+
     err = bt_addr_from_str(CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET_MAC, &addr);
     if (err) {
         LOG_ERR("Invalid target MAC: %s", CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET_MAC);
         return err;
     }
 
+    target_any_addr = false;
+    selected_target_valid = true;
     target_addr.type = target_is_public ? BT_ADDR_LE_PUBLIC : BT_ADDR_LE_RANDOM;
     bt_addr_copy(&target_addr.a, &addr);
 
@@ -1395,6 +1440,7 @@ static int ble_hogp_sniffer_init(void) {
         return err;
     }
 
+    target_any_addr = false;
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_BUTTON_SELECTOR)) {
         selected_target_valid = false;
         memset(&target_addr, 0, sizeof(target_addr));
@@ -1414,7 +1460,7 @@ static int ble_hogp_sniffer_init(void) {
     target_hid_verified = false;
 
     (void)clear_non_target_bonds();
-    apply_host_adv_policy(false);
+    apply_host_adv_policy(should_wait_for_host() ? true : false);
 
     err = start_scan();
     if (err) {
