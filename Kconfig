@@ -45,6 +45,24 @@ config ZMK_BLE_HOGP_SNIFFER_REQUIRE_HIDS_IN_ADV
       (0x1812) in UUID16 AD fields. This helps avoid connecting to split-side
       non-HID endpoints that share nearby traffic.
 
+config ZMK_BLE_HOGP_SNIFFER_REJECT_SPLIT_UUID_IN_ADV
+    bool "Reject advertisements containing ZMK split service UUID"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    default y
+    help
+      Skip connection attempts when target MAC advertisement contains
+      ZMK split BLE service UUID. Useful when HIDS-in-ADV requirement is
+      disabled but you still want to avoid connecting to split-side links.
+
+config ZMK_BLE_HOGP_SNIFFER_SCAN_CYCLE_MS
+    int "Scan cycle duration before attempting connect (ms)"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    range 200 10000
+    default 1500
+    help
+      Duration of one scan cycle. During this period, matching candidates are
+      collected and the connection attempt is made after the cycle ends.
+
 config ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS
     bool "Forward keyboard usages as ZMK key events"
     depends on ZMK_BLE_HOGP_SNIFFER
