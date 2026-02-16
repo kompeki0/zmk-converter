@@ -79,6 +79,7 @@ static uint8_t reconnect_fail_count;
 static bool host_adv_blocked;
 static bool host_connected;
 static bool target_hid_verified;
+static int64_t next_connect_allowed_ms;
 static uint8_t report_sub_count;
 static uint16_t pending_report_char_handle;
 static uint16_t pending_report_value_handle;
@@ -474,7 +475,7 @@ static bool ad_parse_name_cb(struct bt_data *data, void *user_data) {
             ctx->out[ctx->len++] = (char)c;
         } else {
             /* Keep length/shape of name while avoiding unsupported glyphs. */
-            ctx->out[ctx->len++] = '*';
+            ctx->out[ctx->len++] = 'x';
         }
     }
     ctx->out[ctx->len] = '\0';
@@ -978,6 +979,9 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
 
     if (err) {
         LOG_ERR("Connection failed (err 0x%02x)", err);
+        if (err == BT_HCI_ERR_CONN_FAIL_TO_ESTAB || err == BT_HCI_ERR_UNKNOWN_CONN_ID) {
+            next_connect_allowed_ms = k_uptime_get() + 5000;
+        }
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
         screen_log_target_code("target connect err", err);
 #endif
@@ -1065,6 +1069,10 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
     }
 
     LOG_INF("Disconnected (reason 0x%02x)", reason);
+    if (reason == BT_HCI_ERR_CONN_FAIL_TO_ESTAB || reason == BT_HCI_ERR_REMOTE_USER_TERM_CONN ||
+        reason == BT_HCI_ERR_CONN_TIMEOUT) {
+        next_connect_allowed_ms = k_uptime_get() + 5000;
+    }
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     screen_log_target_addr("target disconnected", peer);
     screen_log_target_code("target disc reason", reason);
@@ -1314,6 +1322,12 @@ static int start_scan(void) {
 
 static int connect_to_candidate(const bt_addr_le_t *addr) {
     int err;
+    int64_t now = k_uptime_get();
+
+    if (now < next_connect_allowed_ms) {
+        LOG_WRN("Connect throttled for %lld ms", (long long)(next_connect_allowed_ms - now));
+        return -EAGAIN;
+    }
 
     connecting = true;
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
@@ -1687,6 +1701,7 @@ static int ble_hogp_sniffer_init(void) {
     prev_consumer_slot_count = 0;
     memset(prev_consumer_slots, 0, sizeof(prev_consumer_slots));
     target_hid_verified = false;
+    next_connect_allowed_ms = 0;
 
     (void)clear_non_target_bonds();
     apply_host_adv_policy(should_wait_for_host() ? true : false);

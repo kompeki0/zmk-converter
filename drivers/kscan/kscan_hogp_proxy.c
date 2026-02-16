@@ -38,6 +38,7 @@ struct hogp_proxy_kscan_data {
     uint8_t button_pins[4];
     struct gpio_callback gpio_cb;
     bool btn_pressed[4];
+    int64_t btn_last_change_ms[4];
 };
 
 static struct hogp_proxy_kscan_data *g_inst;
@@ -71,7 +72,13 @@ static void hogp_proxy_gpio_cb(const struct device *port, struct gpio_callback *
             continue;
         }
 
+        int64_t now = k_uptime_get();
+        if ((now - data->btn_last_change_ms[i]) < 40) {
+            continue;
+        }
+
         data->btn_pressed[i] = pressed;
+        data->btn_last_change_ms[i] = now;
         if (zmk_hogp_sniffer_button_event(i, pressed) == 0) {
             continue;
         }
@@ -157,6 +164,7 @@ static int hogp_proxy_kscan_init(const struct device *dev) {
 
         int val = gpio_pin_get(data->gpio_dev, pin);
         data->btn_pressed[i] = (val == 0);
+        data->btn_last_change_ms[i] = 0;
     }
 
     gpio_init_callback(&data->gpio_cb, hogp_proxy_gpio_cb, pin_mask);
