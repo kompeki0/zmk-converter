@@ -63,21 +63,59 @@ int zmk_hogp_proxy_kscan_inject(uint16_t row, uint16_t col, bool pressed);
 #endif
 
 static bool usage_to_row_col(uint8_t usage, uint16_t *row, uint16_t *col) {
-    /* Minimal mapping for experiment:
-     * - Letters A..Z: HID usages 0x04..0x1D -> col 0..25
-     * - Modifiers: 0xE0..0xE7 -> col 26..33
-     * Matrix is 1 row x 34 cols.
+    /* "100%" (ANSI 104) superset mapping for Keyboard/Keypad page (0x07).
+     * We map a curated usage list to a dense position index (1 row x N cols).
+     *
+     * Notes:
+     * - Modifiers (0xE0..0xE7) are injected from the modifier bitfield.
+     * - Some keys (Intl/JIS) and non-boot consumer/system keys are excluded for now.
      */
-    if (usage >= 0x04 && usage <= 0x1D) {
-        *row = 0;
-        *col = (uint16_t)(usage - 0x04);
-        return true;
-    }
+    static const uint8_t usage_order[] = {
+        /* Top row */
+        0x29,                         /* ESC */
+        0x3A, 0x3B, 0x3C, 0x3D,        /* F1..F4 */
+        0x3E, 0x3F, 0x40, 0x41,        /* F5..F8 */
+        0x42, 0x43, 0x44, 0x45,        /* F9..F12 */
+        0x46, 0x47, 0x48,              /* PRINT_SCREEN, SCROLL_LOCK, PAUSE */
 
-    if (usage >= 0xE0 && usage <= 0xE7) {
-        *row = 0;
-        *col = (uint16_t)(26 + (usage - 0xE0));
-        return true;
+        /* Alnum block */
+        0x35,                         /* GRAVE */
+        0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, /* 1..0 */
+        0x2D, 0x2E, 0x2A,              /* -, =, BACKSPACE */
+
+        0x2B,                         /* TAB */
+        0x14, 0x1A, 0x08, 0x15, 0x17, 0x1C, 0x18, 0x0C, 0x12, 0x13, /* Q..P */
+        0x2F, 0x30, 0x31,              /* [, ], \ */
+
+        0x39,                         /* CAPS_LOCK */
+        0x04, 0x16, 0x07, 0x09, 0x0A, 0x0B, 0x0D, 0x0E, 0x0F,       /* A..L */
+        0x33, 0x34, 0x28,              /* ;, ', ENTER */
+
+        0xE1,                         /* LSHIFT */
+        0x1D, 0x1B, 0x06, 0x19, 0x05, 0x11, 0x10, 0x36, 0x37, 0x38, /* Z.. / */
+        0xE5,                         /* RSHIFT */
+
+        0xE0, 0xE3, 0xE2, 0x2C, 0xE6, 0xE7, 0x65, 0xE4, /* LCTRL, LGUI, LALT, SPACE, RALT, RGUI, APP, RCTRL */
+
+        /* Navigation cluster */
+        0x49, 0x4A, 0x4B,              /* INSERT, HOME, PAGE_UP */
+        0x4C, 0x4D, 0x4E,              /* DELETE, END, PAGE_DOWN */
+        0x52, 0x50, 0x51, 0x4F,        /* UP, LEFT, DOWN, RIGHT */
+
+        /* Numpad */
+        0x53, 0x54, 0x55, 0x56,        /* NUM_LOCK, KP /, KP *, KP - */
+        0x5F, 0x60, 0x61, 0x57,        /* KP7, KP8, KP9, KP+ */
+        0x5C, 0x5D, 0x5E,              /* KP4, KP5, KP6 */
+        0x59, 0x5A, 0x5B, 0x58,        /* KP1, KP2, KP3, KP_ENTER */
+        0x62, 0x63,                    /* KP0, KP. */
+    };
+
+    for (uint16_t i = 0; i < (uint16_t)ARRAY_SIZE(usage_order); i++) {
+        if (usage_order[i] == usage) {
+            *row = 0;
+            *col = i;
+            return true;
+        }
     }
 
     return false;

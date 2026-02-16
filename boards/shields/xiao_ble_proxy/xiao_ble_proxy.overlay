@@ -4,18 +4,26 @@
     hogp_kscan: hogp_kscan {
         compatible = "zmk,kscan-hogp-proxy";
         rows = <1>;
-        columns = <34>;
+        columns = <104>;
     };
 
     default_transform: keymap_transform0 {
         compatible = "zmk,matrix-transform";
-        columns = <34>;
+        columns = <104>;
         rows = <1>;
         map = <
             RC(0,0)  RC(0,1)  RC(0,2)  RC(0,3)  RC(0,4)  RC(0,5)  RC(0,6)  RC(0,7)  RC(0,8)
             RC(0,9)  RC(0,10) RC(0,11) RC(0,12) RC(0,13) RC(0,14) RC(0,15) RC(0,16) RC(0,17)
-            RC(0,18) RC(0,19) RC(0,20) RC(0,21) RC(0,22) RC(0,23) RC(0,24) RC(0,25)
-            RC(0,26) RC(0,27) RC(0,28) RC(0,29) RC(0,30) RC(0,31) RC(0,32) RC(0,33)
+            RC(0,18) RC(0,19) RC(0,20) RC(0,21) RC(0,22) RC(0,23) RC(0,24) RC(0,25) RC(0,26)
+            RC(0,27) RC(0,28) RC(0,29) RC(0,30) RC(0,31) RC(0,32) RC(0,33) RC(0,34) RC(0,35)
+            RC(0,36) RC(0,37) RC(0,38) RC(0,39) RC(0,40) RC(0,41) RC(0,42) RC(0,43) RC(0,44)
+            RC(0,45) RC(0,46) RC(0,47) RC(0,48) RC(0,49) RC(0,50) RC(0,51) RC(0,52) RC(0,53)
+            RC(0,54) RC(0,55) RC(0,56) RC(0,57) RC(0,58) RC(0,59) RC(0,60) RC(0,61) RC(0,62)
+            RC(0,63) RC(0,64) RC(0,65) RC(0,66) RC(0,67) RC(0,68) RC(0,69) RC(0,70) RC(0,71)
+            RC(0,72) RC(0,73) RC(0,74) RC(0,75) RC(0,76) RC(0,77) RC(0,78) RC(0,79) RC(0,80)
+            RC(0,81) RC(0,82) RC(0,83) RC(0,84) RC(0,85) RC(0,86) RC(0,87) RC(0,88) RC(0,89)
+            RC(0,90) RC(0,91) RC(0,92) RC(0,93) RC(0,94) RC(0,95) RC(0,96) RC(0,97) RC(0,98)
+            RC(0,99) RC(0,100) RC(0,101) RC(0,102) RC(0,103)
         >;
     };
 
@@ -29,5 +37,13 @@
     chosen {
         zmk,kscan = &hogp_kscan;
         zmk,physical-layout = &physical_layout0;
+        zephyr,console = &cdc_acm_uart0;
+        zephyr,shell-uart = &cdc_acm_uart0;
+    };
+};
+
+&zephyr_udc0 {
+    cdc_acm_uart0: cdc_acm_uart0 {
+        compatible = "zephyr,cdc-acm-uart";
     };
 };

@@ -5,14 +5,79 @@
     keymap {
         compatible = "zmk,keymap";
 
+        /*
+         * Layer 0: actual remap layer.
+         * Keep as &none and override positions you want.
+         */
         default_layer {
-            /* 34 positions: A..Z then modifiers (LCTRL..RGUI) */
             bindings = <
-                &kp X  &kp B  &kp C  &kp D  &kp E  &kp F  &kp G  &kp H  &kp I
-                &kp J  &kp K  &kp L  &kp M  &kp N  &kp O  &kp P  &kp Q  &kp R
-                &kp S  &kp T  &kp U  &kp V  &kp W  &kp X  &kp Y  &kp Z
-                &kp LCTRL &kp LSHIFT &kp LALT &kp LGUI &kp RCTRL &kp RSHIFT &kp RALT &kp RGUI
+                /* 0..15: ESC, F1..F12, PSCR, SLCK, PAUSE */
+                &none &none &none &none &none &none &none &none &none &none &none &none &none &none &none &none
+
+                /* 16..29: `, 1..0, -, =, BSPC */
+                &none &none &none &none &none &none &none &none &none &none &none &none &none &none
+
+                /* 30..43: TAB, Q..P, [, ], \ */
+                &none &none &none &none &none &none &none &none &none &none &none &none &none &none
+
+                /* 44..56: CAPS, A..L, ;, ', ENTER */
+                &none &none &none &none &none &none &none &none &none &none &none &none &none
+
+                /* 57..68: LSHIFT, Z.. /, RSHIFT */
+                &none &none &none &none &none &none &none &none &none &none &none &none
+
+                /* 69..76: LCTRL, LGUI, LALT, SPACE, RALT, RGUI, APP, RCTRL */
+                &none &none &none &none &none &none &none &none
+
+                /* 77..86: INS, HOME, PGUP, DEL, END, PGDN, UP, LEFT, DOWN, RIGHT */
+                &none &none &none &none &none &none &none &none &none &none
+
+                /* 87..103: numpad cluster */
+                &none &none &none &none &none &none &none &none &none &none &none &none &none &none &none &none &none
+            >;
+        };
+
+        /*
+         * Layer 1: reference layer using &kp defaults aligned to usage_order[].
+         * Not auto-selected; this is for easier visual editing/copy.
+         */
+        reference_layer {
+            bindings = <
+                /* 0..15 */
+                &kp ESC   &kp F1    &kp F2    &kp F3    &kp F4    &kp F5    &kp F6    &kp F7
+                &kp F8    &kp F9    &kp F10   &kp F11   &kp F12   &kp PSCRN &kp SLCK  &kp PAUSE
+
+                /* 16..29 */
+                &kp GRAVE &kp N1    &kp N2    &kp N3    &kp N4    &kp N5    &kp N6    &kp N7
+                &kp N8    &kp N9    &kp N0    &kp MINUS &kp EQUAL &kp BSPC
+
+                /* 30..43 */
+                &kp TAB   &kp Q     &kp W     &kp E     &kp R     &kp T     &kp Y     &kp U
+                &kp I     &kp O     &kp P     &kp LBKT  &kp RBKT  &kp BSLH
+
+                /* 44..56 */
+                &kp CAPS  &kp A     &kp S     &kp D     &kp F     &kp G     &kp H     &kp J
+                &kp K     &kp L     &kp SEMI  &kp SQT   &kp RET
+
+                /* 57..68 */
+                &kp LSHFT &kp Z     &kp X     &kp C     &kp V     &kp B     &kp N     &kp M
+                &kp COMMA &kp DOT   &kp FSLH  &kp RSHFT
+
+                /* 69..76 */
+                &kp LCTRL &kp LGUI  &kp LALT  &kp SPACE &kp RALT  &kp RGUI  &none     &kp RCTRL
+
+                /* 77..86 */
+                &kp INS   &kp HOME  &kp PG_UP &kp DEL   &kp END   &kp PG_DN &kp UP    &kp LEFT
+                &kp DOWN  &kp RIGHT
+
+                /* 87..103 */
+                &kp KP_NUM   &kp KP_DIVIDE &kp KP_MULTIPLY &kp KP_MINUS
+                &kp KP7      &kp KP8       &kp KP9         &kp KP_PLUS
+                &kp KP4      &kp KP5       &kp KP6
+                &kp KP1      &kp KP2       &kp KP3         &kp KP_ENTER
+                &kp KP0      &kp KP_DOT
             >;
         };
     };
 };
+
