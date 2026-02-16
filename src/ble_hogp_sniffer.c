@@ -51,8 +51,10 @@ static bool gatt_discovery_started;
 static uint8_t reconnect_fail_count;
 static bool host_adv_blocked;
 static uint8_t report_sub_count;
-static uint16_t pending_report_char_handle;
-static uint16_t pending_report_value_handle;
+static uint16_t report_decl_handles[MAX_REPORT_SUBSCRIPTIONS];
+static uint16_t report_value_handles[MAX_REPORT_SUBSCRIPTIONS];
+static uint8_t report_char_count;
+static uint8_t report_desc_index;
 
 static struct bt_uuid_16 hids_uuid = BT_UUID_INIT_16(BT_UUID_HIDS_VAL);
 static struct bt_uuid_16 report_uuid = BT_UUID_INIT_16(BT_UUID_HIDS_REPORT_VAL);
@@ -66,7 +68,9 @@ static int clear_non_target_bonds(void);
 static void schedule_scan_restart(void);
 static void apply_host_adv_policy(bool target_connected);
 static bool ad_contains_hids_uuid(const struct net_buf_simple *ad);
-static int resume_report_discovery(struct bt_conn *conn, uint16_t next_start_handle);
+static int discover_next_report_ccc(struct bt_conn *conn);
+static uint8_t discover_ccc_cb(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                               struct bt_gatt_discover_params *params);
 static uint8_t discover_report_cb(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                                   struct bt_gatt_discover_params *params);
 
@@ -331,12 +335,26 @@ static int clear_non_target_bonds(void) {
     return 0;
 }
 
-static int resume_report_discovery(struct bt_conn *conn, uint16_t next_start_handle) {
-    discover_params.uuid = &report_uuid.uuid;
-    discover_params.start_handle = next_start_handle;
-    discover_params.end_handle = hids_end_handle;
-    discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
-    discover_params.func = discover_report_cb;
+static int discover_next_report_ccc(struct bt_conn *conn) {
+    uint16_t end_handle;
+
+    if (report_desc_index >= report_char_count) {
+        LOG_INF("Report descriptor scan complete (subs=%u chars=%u)", report_sub_count,
+                report_char_count);
+        return 0;
+    }
+
+    if ((report_desc_index + 1U) < report_char_count) {
+        end_handle = (uint16_t)(report_decl_handles[report_desc_index + 1U] - 1U);
+    } else {
+        end_handle = hids_end_handle;
+    }
+
+    discover_params.uuid = &ccc_uuid.uuid;
+    discover_params.start_handle = (uint16_t)(report_value_handles[report_desc_index] + 1U);
+    discover_params.end_handle = end_handle;
+    discover_params.type = BT_GATT_DISCOVER_DESCRIPTOR;
+    discover_params.func = discover_ccc_cb;
     return bt_gatt_discover(conn, &discover_params);
 }
 
@@ -366,12 +384,15 @@ static uint8_t notify_cb(struct bt_conn *conn, struct bt_gatt_subscribe_params *
 static uint8_t discover_ccc_cb(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                                struct bt_gatt_discover_params *params) {
     int err;
+    ARG_UNUSED(params);
 
     if (!attr) {
-        LOG_WRN("CCC descriptor not found for value handle 0x%04x", pending_report_value_handle);
-        err = resume_report_discovery(conn, (uint16_t)(pending_report_char_handle + 1));
+        LOG_WRN("CCC descriptor not found for report idx=%u vh=0x%04x", report_desc_index,
+                report_value_handles[report_desc_index]);
+        report_desc_index++;
+        err = discover_next_report_ccc(conn);
         if (err) {
-            LOG_ERR("Resume report discovery failed (%d)", err);
+            LOG_ERR("Next CCC discovery failed (%d)", err);
         }
         return BT_GATT_ITER_STOP;
     }
@@ -381,31 +402,34 @@ static uint8_t discover_ccc_cb(struct bt_conn *conn, const struct bt_gatt_attr *
     }
 
     if (report_sub_count >= MAX_REPORT_SUBSCRIPTIONS) {
-        LOG_WRN("Reached max report subscriptions (%u), skip vh=0x%04x", MAX_REPORT_SUBSCRIPTIONS,
-                pending_report_value_handle);
+        LOG_WRN("Reached max report subscriptions (%u), skip idx=%u vh=0x%04x",
+                MAX_REPORT_SUBSCRIPTIONS, report_desc_index,
+                report_value_handles[report_desc_index]);
     } else {
         struct bt_gatt_subscribe_params *sub = &subscribe_params[report_sub_count];
 
         memset(sub, 0, sizeof(*sub));
         sub->notify = notify_cb;
         sub->value = BT_GATT_CCC_NOTIFY;
-        sub->value_handle = pending_report_value_handle;
+        sub->value_handle = report_value_handles[report_desc_index];
         sub->ccc_handle = attr->handle;
 
         err = bt_gatt_subscribe(conn, sub);
         if (err) {
-            LOG_ERR("bt_gatt_subscribe failed for vh=0x%04x (%d)", pending_report_value_handle, err);
+            LOG_ERR("bt_gatt_subscribe failed for idx=%u vh=0x%04x (%d)", report_desc_index,
+                    report_value_handles[report_desc_index], err);
         } else {
             reconnect_fail_count = 0;
             report_sub_count++;
-            LOG_INF("Subscribed Input Report #%u (vh=0x%04x ccc=0x%04x)", report_sub_count,
-                    pending_report_value_handle, attr->handle);
+            LOG_INF("Subscribed Input Report #%u (idx=%u vh=0x%04x ccc=0x%04x)", report_sub_count,
+                    report_desc_index, report_value_handles[report_desc_index], attr->handle);
         }
     }
 
-    err = resume_report_discovery(conn, (uint16_t)(pending_report_char_handle + 1));
+    report_desc_index++;
+    err = discover_next_report_ccc(conn);
     if (err) {
-        LOG_ERR("Resume report discovery failed (%d)", err);
+        LOG_ERR("Next CCC discovery failed (%d)", err);
     }
 
     return BT_GATT_ITER_STOP;
@@ -418,10 +442,18 @@ static uint8_t discover_report_cb(struct bt_conn *conn, const struct bt_gatt_att
     ARG_UNUSED(params);
 
     if (!attr) {
-        if (report_sub_count == 0) {
-            LOG_ERR("No notifiable Input Report characteristic subscribed");
+        report_desc_index = 0;
+        if (report_char_count == 0) {
+            LOG_ERR("No notifiable Input Report characteristics found");
+            return BT_GATT_ITER_STOP;
+        }
+
+        err = discover_next_report_ccc(conn);
+        if (err) {
+            LOG_ERR("Initial CCC discovery failed (%d)", err);
         } else {
-            LOG_INF("Report discovery complete (subscriptions=%u)", report_sub_count);
+            LOG_INF("Report characteristic discovery complete (chars=%u), scanning CCC",
+                    report_char_count);
         }
         return BT_GATT_ITER_STOP;
     }
@@ -431,23 +463,17 @@ static uint8_t discover_report_cb(struct bt_conn *conn, const struct bt_gatt_att
         return BT_GATT_ITER_CONTINUE;
     }
 
-    pending_report_char_handle = attr->handle;
-    pending_report_value_handle = chrc->value_handle;
-
-    discover_params.uuid = &ccc_uuid.uuid;
-    discover_params.start_handle = chrc->value_handle + 1;
-    discover_params.end_handle = hids_end_handle;
-    discover_params.type = BT_GATT_DISCOVER_DESCRIPTOR;
-    discover_params.func = discover_ccc_cb;
-
-    err = bt_gatt_discover(conn, &discover_params);
-    if (err) {
-        LOG_ERR("CCC discovery failed (%d)", err);
-    } else {
-        LOG_INF("Discovering CCC descriptor for vh=0x%04x", chrc->value_handle);
+    if (report_char_count >= MAX_REPORT_SUBSCRIPTIONS) {
+        LOG_WRN("Too many notifiable report chars, truncating at %u", MAX_REPORT_SUBSCRIPTIONS);
+        return BT_GATT_ITER_CONTINUE;
     }
 
-    return BT_GATT_ITER_STOP;
+    report_decl_handles[report_char_count] = attr->handle;
+    report_value_handles[report_char_count] = chrc->value_handle;
+    LOG_INF("Found notifiable Input Report char idx=%u vh=0x%04x", report_char_count,
+            chrc->value_handle);
+    report_char_count++;
+    return BT_GATT_ITER_CONTINUE;
 }
 
 static uint8_t discover_hids_cb(struct bt_conn *conn, const struct bt_gatt_attr *attr,
@@ -466,11 +492,19 @@ static uint8_t discover_hids_cb(struct bt_conn *conn, const struct bt_gatt_attr 
     hids_end_handle = svc->end_handle;
 
     report_sub_count = 0;
-    pending_report_char_handle = 0;
-    pending_report_value_handle = 0;
+    report_char_count = 0;
+    report_desc_index = 0;
+    memset(report_decl_handles, 0, sizeof(report_decl_handles));
+    memset(report_value_handles, 0, sizeof(report_value_handles));
     memset(subscribe_params, 0, sizeof(subscribe_params));
 
-    err = resume_report_discovery(conn, (uint16_t)(hids_start_handle + 1));
+    discover_params.uuid = &report_uuid.uuid;
+    discover_params.start_handle = (uint16_t)(hids_start_handle + 1);
+    discover_params.end_handle = hids_end_handle;
+    discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
+    discover_params.func = discover_report_cb;
+
+    err = bt_gatt_discover(conn, &discover_params);
     if (err) {
         LOG_ERR("Report characteristic discovery failed (%d)", err);
     } else {
@@ -553,8 +587,10 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
     default_conn = NULL;
     memset(subscribe_params, 0, sizeof(subscribe_params));
     report_sub_count = 0;
-    pending_report_char_handle = 0;
-    pending_report_value_handle = 0;
+    report_char_count = 0;
+    report_desc_index = 0;
+    memset(report_decl_handles, 0, sizeof(report_decl_handles));
+    memset(report_value_handles, 0, sizeof(report_value_handles));
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)) {
