@@ -468,12 +468,22 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
         return;
     }
 
-    if (derr) {
-        LOG_WRN("bt_conn_set_security failed (%d)", derr);
-        if (reconnect_fail_count < UINT8_MAX) {
-            reconnect_fail_count++;
+    if (derr == 0) {
+        /* Wait for security_changed callback, then start discovery. */
+        return;
+    }
+
+    /* Some stacks can transiently fail set_security (e.g. -ENOMEM). Do not
+     * bounce the link immediately; fallback to discovery and let security
+     * progress in parallel if possible.
+     */
+    LOG_WRN("bt_conn_set_security failed (%d), fallback to discovery", derr);
+    if (!gatt_discovery_started) {
+        gatt_discovery_started = true;
+        derr = discover_hids(conn);
+        if (derr) {
+            LOG_ERR("HID discovery start failed (%d)", derr);
         }
-        schedule_scan_restart();
     }
 }
 
