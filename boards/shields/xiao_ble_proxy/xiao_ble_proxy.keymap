@@ -39,13 +39,13 @@
 
         /*
          * Layer 1: reference layer using &kp defaults aligned to usage_order[].
-         * Not auto-selected; this is for easier visual editing/copy.
+         * Not auto-selected; copy entries from here into default_layer as needed.
          */
-        reference_layer1 {
+        reference_layer {
             bindings = <
                 /* 0..15 */
                 &kp ESC   &kp F1    &kp F2    &kp F3    &kp F4    &kp F5    &kp F6    &kp F7
-                &kp F8    &kp F9    &kp F10   &kp F11   &kp F12   &kp PSCRN &kp SLCK  &kp PAUSE
+                &kp F8    &kp F9    &kp F10   &kp F11   &kp F12   &kp PSCRN &kp SLCK  &kp PAUS
 
                 /* 16..29 */
                 &kp GRAVE &kp N1    &kp N2    &kp N3    &kp N4    &kp N5    &kp N6    &kp N7
@@ -64,7 +64,7 @@
                 &kp COMMA &kp DOT   &kp FSLH  &kp RSHFT
 
                 /* 69..76 */
-                &kp LCTRL &kp LGUI  &kp LALT  &kp SPACE &kp RALT  &kp RGUI  &none     &kp RCTRL
+                &kp LCTRL &kp LGUI  &kp LALT  &kp SPACE &kp RALT  &kp RGUI  &kp K_APP &kp RCTRL
 
                 /* 77..86 */
                 &kp INS   &kp HOME  &kp PG_UP &kp DEL   &kp END   &kp PG_DN &kp UP    &kp LEFT
@@ -72,12 +72,11 @@
 
                 /* 87..103 */
                 &kp KP_NUM   &kp KP_DIVIDE &kp KP_MULTIPLY &kp KP_MINUS
-                &kp KP7      &kp KP8       &kp KP9         &kp KP_PLUS
-                &kp KP4      &kp KP5       &kp KP6
-                &kp KP1      &kp KP2       &kp KP3         &kp KP_ENTER
-                &kp KP0      &kp KP_DOT
+                &kp KP_N7    &kp KP_N8     &kp KP_N9       &kp KP_PLUS
+                &kp KP_N4    &kp KP_N5     &kp KP_N6
+                &kp KP_N1    &kp KP_N2     &kp KP_N3       &kp KP_ENTER
+                &kp KP_N0    &kp KP_DOT
             >;
         };
     };
 };
-
