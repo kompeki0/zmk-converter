@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include <zephyr/device.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/kscan.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -23,6 +24,7 @@ struct hogp_proxy_kscan_event {
 struct hogp_proxy_kscan_config {
     uint16_t rows;
     uint16_t cols;
+    struct gpio_dt_spec buttons[4];
 };
 
 struct hogp_proxy_kscan_data {
@@ -33,9 +35,38 @@ struct hogp_proxy_kscan_data {
     struct k_msgq msgq;
     struct hogp_proxy_kscan_event qbuf[32];
     struct k_work work;
+    struct gpio_callback gpio_cbs[4];
+    bool btn_pressed[4];
 };
 
 static struct hogp_proxy_kscan_data *g_inst;
+
+static void hogp_proxy_gpio_cb(const struct device *port, struct gpio_callback *cb, uint32_t pins) {
+    ARG_UNUSED(port);
+    ARG_UNUSED(cb);
+    ARG_UNUSED(pins);
+
+    if (!g_inst) {
+        return;
+    }
+
+    const struct hogp_proxy_kscan_config *cfg = g_inst->dev->config;
+
+    for (uint8_t i = 0; i < ARRAY_SIZE(cfg->buttons); i++) {
+        int val = gpio_pin_get_dt(&cfg->buttons[i]);
+        if (val < 0) {
+            continue;
+        }
+
+        bool pressed = (val > 0);
+        if (pressed == g_inst->btn_pressed[i]) {
+            continue;
+        }
+
+        g_inst->btn_pressed[i] = pressed;
+        (void)zmk_hogp_proxy_kscan_inject(0, (uint16_t)(114 + i), pressed);
+    }
+}
 
 static void hogp_proxy_kscan_work_handler(struct k_work *work) {
     struct hogp_proxy_kscan_data *data = CONTAINER_OF(work, struct hogp_proxy_kscan_data, work);
@@ -87,6 +118,35 @@ static int hogp_proxy_kscan_init(const struct device *dev) {
     k_msgq_init(&data->msgq, (char *)data->qbuf, sizeof(data->qbuf[0]), ARRAY_SIZE(data->qbuf));
     k_work_init(&data->work, hogp_proxy_kscan_work_handler);
 
+    for (uint8_t i = 0; i < ARRAY_SIZE(cfg->buttons); i++) {
+        if (!gpio_is_ready_dt(&cfg->buttons[i])) {
+            LOG_ERR("button %u GPIO not ready", i);
+            return -ENODEV;
+        }
+
+        int err = gpio_pin_configure_dt(&cfg->buttons[i], GPIO_INPUT);
+        if (err) {
+            LOG_ERR("button %u configure failed (%d)", i, err);
+            return err;
+        }
+
+        err = gpio_pin_interrupt_configure_dt(&cfg->buttons[i], GPIO_INT_EDGE_BOTH);
+        if (err) {
+            LOG_ERR("button %u irq config failed (%d)", i, err);
+            return err;
+        }
+
+        gpio_init_callback(&data->gpio_cbs[i], hogp_proxy_gpio_cb, BIT(cfg->buttons[i].pin));
+        err = gpio_add_callback(cfg->buttons[i].port, &data->gpio_cbs[i]);
+        if (err) {
+            LOG_ERR("button %u add callback failed (%d)", i, err);
+            return err;
+        }
+
+        int val = gpio_pin_get_dt(&cfg->buttons[i]);
+        data->btn_pressed[i] = (val > 0);
+    }
+
     g_inst = data;
     return 0;
 }
@@ -118,7 +178,7 @@ int zmk_hogp_proxy_kscan_inject(uint16_t row, uint16_t col, bool pressed) {
  */
 #define HOGP_PROXY_KSCAN_NODE DT_INST(0, zmk_kscan_hogp_proxy)
 #define HOGP_PROXY_ROWS 1
-#define HOGP_PROXY_COLS 114
+#define HOGP_PROXY_COLS 118
 
 BUILD_ASSERT(DT_NUM_INST_STATUS_OKAY(zmk_kscan_hogp_proxy) <= 1,
              "Only one zmk,kscan-hogp-proxy instance is supported");
@@ -126,6 +186,13 @@ BUILD_ASSERT(DT_NUM_INST_STATUS_OKAY(zmk_kscan_hogp_proxy) <= 1,
 static const struct hogp_proxy_kscan_config hogp_proxy_kscan_cfg = {
     .rows = HOGP_PROXY_ROWS,
     .cols = HOGP_PROXY_COLS,
+    .buttons =
+        {
+            GPIO_DT_SPEC_GET_BY_IDX(HOGP_PROXY_KSCAN_NODE, input_gpios, 0),
+            GPIO_DT_SPEC_GET_BY_IDX(HOGP_PROXY_KSCAN_NODE, input_gpios, 1),
+            GPIO_DT_SPEC_GET_BY_IDX(HOGP_PROXY_KSCAN_NODE, input_gpios, 2),
+            GPIO_DT_SPEC_GET_BY_IDX(HOGP_PROXY_KSCAN_NODE, input_gpios, 3),
+        },
 };
 
 static struct hogp_proxy_kscan_data hogp_proxy_kscan_data;

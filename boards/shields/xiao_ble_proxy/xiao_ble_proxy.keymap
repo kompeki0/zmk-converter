@@ -47,39 +47,9 @@
                 &kp C_VOL_DN &kp C_VOL_UP &kp C_MUTE &kp C_PREV
                 &kp C_PP     &kp C_NEXT   &kp C_STOP &kp C_BRI_UP
                 &kp C_BRI_DN &kp C_MUTE
-            >;
-        };
 
-        /* Layer 2: consumer/media layer (hold APP position to access) */
-        consumer_layer {
-            bindings = <
-                /* 0..15 */
-                &trans &kp C_VOL_DN &kp C_VOL_UP &kp C_MUTE &kp C_PREV &kp C_PP &kp C_NEXT &kp C_STOP
-                &kp C_BRI_DN &kp C_BRI_UP &trans &trans &trans &trans &trans &trans
-
-                /* 16..29 */
-                &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans
-
-                /* 30..43 */
-                &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans
-
-                /* 44..56 */
-                &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans
-
-                /* 57..68 */
-                &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans
-
-                /* 69..76 */
-                &trans &trans &trans &trans &trans &trans &trans &trans
-
-                /* 77..86 */
-                &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans
-
-                /* 87..103 */
-                &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans
-
-                /* 104..113 */
-                &trans &trans &trans &trans &trans &trans &trans &trans &trans &trans
+                /* 114..117: external tact switches on pins 0..3 */
+                &kp A &kp B &kp C &kp D
             >;
         };
 
@@ -127,6 +97,9 @@
                 &kp C_VOL_DN &kp C_VOL_UP &kp C_MUTE &kp C_PREV
                 &kp C_PP     &kp C_NEXT   &kp C_STOP &kp C_BRI_UP
                 &kp C_BRI_DN &kp C_MUTE
+
+                /* 114..117 */
+                &kp F13 &kp F14 &kp F15 &kp F16
             >;
         };
     };
