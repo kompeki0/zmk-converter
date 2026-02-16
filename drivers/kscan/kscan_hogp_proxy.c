@@ -118,7 +118,7 @@ int zmk_hogp_proxy_kscan_inject(uint16_t row, uint16_t col, bool pressed) {
  */
 #define HOGP_PROXY_KSCAN_NODE DT_INST(0, zmk_kscan_hogp_proxy)
 #define HOGP_PROXY_ROWS 1
-#define HOGP_PROXY_COLS 104
+#define HOGP_PROXY_COLS 112
 
 BUILD_ASSERT(DT_NUM_INST_STATUS_OKAY(zmk_kscan_hogp_proxy) <= 1,
              "Only one zmk,kscan-hogp-proxy instance is supported");

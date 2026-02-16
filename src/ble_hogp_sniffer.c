@@ -27,6 +27,9 @@ LOG_MODULE_REGISTER(ble_hogp_sniffer, CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_LEVEL);
 #define BOOT_KBD_REPORT_LEN 8
 #define MAX_PRESSED_USAGES 14
 #define MAX_REPORT_SUBSCRIPTIONS 6
+#define CONSUMER_SLOT_BASE 104
+#define CONSUMER_SLOT_COUNT 8
+#define CONSUMER_BITS_12B 88
 
 static struct bt_conn *default_conn;
 static struct bt_gatt_discover_params discover_params;
@@ -62,6 +65,9 @@ static struct bt_uuid_16 ccc_uuid = BT_UUID_INIT_16(BT_UUID_GATT_CCC_VAL);
 
 static uint8_t prev_usages[MAX_PRESSED_USAGES];
 static size_t prev_usage_count;
+static uint8_t prev_consumer_slots[CONSUMER_SLOT_COUNT];
+static size_t prev_consumer_slot_count;
+static int8_t consumer_bit_to_slot[CONSUMER_BITS_12B];
 
 static int start_scan(void);
 static int clear_non_target_bonds(void);
@@ -78,9 +84,7 @@ static uint8_t discover_report_cb(struct bt_conn *conn, const struct bt_gatt_att
 static void emit_usage_state(uint8_t usage, bool pressed);
 #endif
 
-#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_EMIT_POSITION_EVENTS)
 int zmk_hogp_proxy_kscan_inject(uint16_t row, uint16_t col, bool pressed);
-#endif
 
 static bool usage_to_row_col(uint8_t usage, uint16_t *row, uint16_t *col) {
     /* "100%" (ANSI 104) superset mapping for Keyboard/Keypad page (0x07).
@@ -234,6 +238,77 @@ static void build_usage_set_from_boot_report(const uint8_t *report, size_t repor
     }
 }
 
+static bool slot_exists(const uint8_t *slots, size_t count, uint8_t slot) {
+    for (size_t i = 0; i < count; i++) {
+        if (slots[i] == slot) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void append_slot_unique(uint8_t *slots, size_t *count, uint8_t slot) {
+    if (*count >= CONSUMER_SLOT_COUNT || slot_exists(slots, *count, slot)) {
+        return;
+    }
+    slots[(*count)++] = slot;
+}
+
+static int allocate_consumer_slot_for_bit(uint8_t bit_index) {
+    if (bit_index >= CONSUMER_BITS_12B) {
+        return -EINVAL;
+    }
+
+    if (consumer_bit_to_slot[bit_index] >= 0) {
+        return consumer_bit_to_slot[bit_index];
+    }
+
+    bool used[CONSUMER_SLOT_COUNT] = {0};
+    for (uint8_t i = 0; i < CONSUMER_BITS_12B; i++) {
+        if (consumer_bit_to_slot[i] >= 0 && consumer_bit_to_slot[i] < CONSUMER_SLOT_COUNT) {
+            used[(uint8_t)consumer_bit_to_slot[i]] = true;
+        }
+    }
+
+    for (uint8_t slot = 0; slot < CONSUMER_SLOT_COUNT; slot++) {
+        if (!used[slot]) {
+            consumer_bit_to_slot[bit_index] = (int8_t)slot;
+            LOG_INF("Mapped consumer bit %u -> slot %u (position %u)", bit_index, slot,
+                    (uint16_t)(CONSUMER_SLOT_BASE + slot));
+            return slot;
+        }
+    }
+
+    return -ENOMEM;
+}
+
+static void build_consumer_slots_from_12byte_report(const uint8_t *report, size_t report_len,
+                                                    uint8_t *slots, size_t *count) {
+    *count = 0;
+    if (report_len != 12U) {
+        return;
+    }
+
+    for (uint8_t byte_idx = 1; byte_idx < 12U; byte_idx++) {
+        uint8_t b = report[byte_idx];
+        if (b == 0U) {
+            continue;
+        }
+
+        for (uint8_t bit = 0; bit < 8U; bit++) {
+            if (!(b & BIT(bit))) {
+                continue;
+            }
+
+            uint8_t bit_index = (uint8_t)(((byte_idx - 1U) * 8U) + bit);
+            int slot = allocate_consumer_slot_for_bit(bit_index);
+            if (slot >= 0) {
+                append_slot_unique(slots, count, (uint8_t)slot);
+            }
+        }
+    }
+}
+
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 static void emit_usage_state(uint8_t usage, bool pressed) {
     int err = raise_zmk_keycode_state_changed_from_encoded(usage, pressed, k_uptime_get());
@@ -293,6 +368,29 @@ static void process_boot_report(const uint8_t *report, size_t report_len) {
 
     prev_usage_count = curr_usage_count;
     memcpy(prev_usages, curr_usages, curr_usage_count);
+}
+
+static void process_nkro12_report(const uint8_t *report, size_t report_len) {
+    uint8_t curr_slots[CONSUMER_SLOT_COUNT];
+    size_t curr_slot_count = 0;
+
+    build_consumer_slots_from_12byte_report(report, report_len, curr_slots, &curr_slot_count);
+
+    for (size_t i = 0; i < prev_consumer_slot_count; i++) {
+        if (!slot_exists(curr_slots, curr_slot_count, prev_consumer_slots[i])) {
+            (void)zmk_hogp_proxy_kscan_inject(0, (uint16_t)(CONSUMER_SLOT_BASE + prev_consumer_slots[i]),
+                                              false);
+        }
+    }
+
+    for (size_t i = 0; i < curr_slot_count; i++) {
+        if (!slot_exists(prev_consumer_slots, prev_consumer_slot_count, curr_slots[i])) {
+            (void)zmk_hogp_proxy_kscan_inject(0, (uint16_t)(CONSUMER_SLOT_BASE + curr_slots[i]), true);
+        }
+    }
+
+    prev_consumer_slot_count = curr_slot_count;
+    memcpy(prev_consumer_slots, curr_slots, curr_slot_count);
 }
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_CLEAR_NON_TARGET_BONDS_ON_START)
@@ -377,7 +475,14 @@ static uint8_t notify_cb(struct bt_conn *conn, struct bt_gatt_subscribe_params *
 
     LOG_INF("HID Input notify: sub=%u vh=0x%04x len=%u", sub_idx, params->value_handle, length);
     LOG_HEXDUMP_INF(data, length, "HID Input");
-    process_boot_report(data, length);
+
+    if (length == BOOT_KBD_REPORT_LEN) {
+        process_boot_report(data, length);
+    } else if (length == 12U) {
+        process_nkro12_report(data, length);
+    } else {
+        LOG_DBG("Unsupported report format for key mapper (len=%u, sub=%u)", length, sub_idx);
+    }
     return BT_GATT_ITER_CONTINUE;
 }
 
@@ -585,12 +690,20 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
 
     bt_conn_unref(default_conn);
     default_conn = NULL;
+
+    for (size_t i = 0; i < prev_consumer_slot_count; i++) {
+        (void)zmk_hogp_proxy_kscan_inject(0, (uint16_t)(CONSUMER_SLOT_BASE + prev_consumer_slots[i]),
+                                          false);
+    }
+
     memset(subscribe_params, 0, sizeof(subscribe_params));
     report_sub_count = 0;
     report_char_count = 0;
     report_desc_index = 0;
     memset(report_decl_handles, 0, sizeof(report_decl_handles));
     memset(report_value_handles, 0, sizeof(report_value_handles));
+    prev_consumer_slot_count = 0;
+    memset(prev_consumer_slots, 0, sizeof(prev_consumer_slots));
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)) {
@@ -842,6 +955,10 @@ static int ble_hogp_sniffer_init(void) {
     if (err) {
         return err;
     }
+
+    memset(consumer_bit_to_slot, -1, sizeof(consumer_bit_to_slot));
+    prev_consumer_slot_count = 0;
+    memset(prev_consumer_slots, 0, sizeof(prev_consumer_slots));
 
     (void)clear_non_target_bonds();
     apply_host_adv_policy(false);
