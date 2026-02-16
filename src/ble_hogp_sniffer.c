@@ -701,6 +701,21 @@ static void screen_log_target_code(const char *prefix, uint8_t code) {
     type_text_line(line);
 }
 
+static void screen_log_target_reason(const char *prefix, uint8_t code, const char *reason) {
+    char line[96];
+    char rs[32];
+    size_t j = 0U;
+
+    for (size_t i = 0; reason && reason[i] != '\0' && j + 1U < sizeof(rs); i++) {
+        uint8_t c = (uint8_t)reason[i];
+        rs[j++] = is_ascii_alnum(c) ? (char)c : 'x';
+    }
+    rs[j] = '\0';
+
+    snprintf(line, sizeof(line), "%s %u %s", prefix, (uint32_t)code, rs[0] ? rs : "unknown");
+    type_text_line(line);
+}
+
 static void screen_log_verbose_code(const char *prefix, uint32_t code) {
     char line[64];
     if (!IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_SCREEN_LOG_VERBOSE)) {
@@ -1136,6 +1151,7 @@ static uint8_t discover_report_cb(struct bt_conn *conn, const struct bt_gatt_att
             LOG_INF("Report discovery complete (subscriptions=%u)", report_sub_count);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
             type_text_line("target ready");
+            type_text_line("input stream on");
             screen_log_verbose_code("sub total", report_sub_count);
 #endif
         }
@@ -1239,7 +1255,7 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
             next_connect_allowed_ms = k_uptime_get() + 5000;
         }
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-        screen_log_target_code("target connect err", err);
+        screen_log_target_reason("target connect err", err, hci_reason_to_str(err));
 #endif
         bt_conn_unref(default_conn);
         default_conn = NULL;
@@ -1257,7 +1273,7 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     LOG_INF("Connected to target");
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     screen_log_target_addr("target connected", peer);
-    screen_log_verbose_text("conn ok");
+    type_text_line("target link up");
 #endif
     if (picker_name_probe_active) {
         memset(&picker_name_read_params, 0, sizeof(picker_name_read_params));
@@ -1355,7 +1371,7 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
     }
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     screen_log_target_addr("target disconnected", peer);
-    screen_log_target_code("target disc reason", reason);
+    screen_log_target_reason("target disc reason", reason, hci_reason_to_str(reason));
     screen_log_verbose_text("reconnect");
 #endif
 
@@ -1410,6 +1426,7 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
                 sec_err_to_str(err));
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
         screen_log_verbose_code("sec err", (uint32_t)err);
+        type_text_line("target sec fail");
 #endif
         return;
     }
@@ -1431,6 +1448,7 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
 #endif
     } else {
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+        type_text_line("target secure");
         screen_log_verbose_text("disc hids");
 #endif
     }
@@ -1444,6 +1462,9 @@ static void pairing_complete_cb(struct bt_conn *conn, bool bonded) {
 static void pairing_failed_cb(struct bt_conn *conn, enum bt_security_err reason) {
     ARG_UNUSED(conn);
     LOG_WRN("Pairing failed (reason=%d: %s)", (int)reason, sec_err_to_str(reason));
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+    screen_log_target_reason("pair fail", (uint8_t)reason, sec_err_to_str(reason));
+#endif
 }
 
 #if defined(CONFIG_BT_SMP)
