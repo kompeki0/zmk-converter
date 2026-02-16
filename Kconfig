@@ -58,10 +58,29 @@ config ZMK_BLE_HOGP_SNIFFER_SCAN_CYCLE_MS
     int "Scan cycle duration before attempting connect (ms)"
     depends on ZMK_BLE_HOGP_SNIFFER
     range 200 10000
-    default 1500
+    default 3000
     help
       Duration of one scan cycle. During this period, matching candidates are
       collected and the connection attempt is made after the cycle ends.
+
+config ZMK_BLE_HOGP_SNIFFER_NEXT_CONNECT_DELAY_MS
+    int "Delay before trying next candidate after disconnect (ms)"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    range 50 3000
+    default 300
+    help
+      Wait time before next connection attempt when stepping through
+      candidates after disconnect/failure. Helps avoid bt_conn_le_create
+      failing while the previous link is still tearing down.
+
+config ZMK_BLE_HOGP_SNIFFER_SINGLE_TARGET_ONLY
+    bool "After HID is verified, reconnect only to the single target"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    default y
+    help
+      If enabled, once HID reports are successfully subscribed, candidate
+      list traversal is disabled and reconnect flow always targets only the
+      configured target MAC.
 
 config ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS
     bool "Forward keyboard usages as ZMK key events"

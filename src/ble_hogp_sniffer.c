@@ -41,6 +41,7 @@ static bt_addr_le_t candidate_addrs[MAX_SCAN_CANDIDATES];
 static struct k_work_delayable sniffer_start_work;
 static struct k_work_delayable reconnect_work;
 static struct k_work_delayable scan_cycle_work;
+static struct k_work_delayable candidate_connect_work;
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT) &&                                \
     defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 static struct k_work_delayable selftest_work;
@@ -60,6 +61,7 @@ static uint8_t candidate_index;
 static bool gatt_discovery_started;
 static uint8_t reconnect_fail_count;
 static bool host_adv_blocked;
+static bool target_hid_verified;
 static uint8_t report_sub_count;
 static uint16_t pending_report_char_handle;
 static uint16_t pending_report_value_handle;
@@ -67,6 +69,12 @@ static uint16_t pending_report_value_handle;
 static struct bt_uuid_16 hids_uuid = BT_UUID_INIT_16(BT_UUID_HIDS_VAL);
 static struct bt_uuid_16 report_uuid = BT_UUID_INIT_16(BT_UUID_HIDS_REPORT_VAL);
 static struct bt_uuid_16 ccc_uuid = BT_UUID_INIT_16(BT_UUID_GATT_CCC_VAL);
+static const struct bt_le_conn_param target_conn_param = {
+    .interval_min = 24, /* 30ms */
+    .interval_max = 40, /* 50ms */
+    .latency = 0,
+    .timeout = 800, /* 8s supervision timeout */
+};
 
 static uint8_t prev_usages[MAX_PRESSED_USAGES];
 static size_t prev_usage_count;
@@ -77,6 +85,8 @@ static int8_t consumer_bit_to_slot[CONSUMER_BITS_12B];
 static int start_scan(void);
 static int connect_to_candidate(const bt_addr_le_t *addr);
 static bool try_next_candidate_or_rescan(void);
+static bool candidate_list_contains(const bt_addr_le_t *addr);
+static void schedule_connect_current_candidate(uint32_t delay_ms);
 static int clear_non_target_bonds(void);
 static void schedule_scan_restart(void);
 static void apply_host_adv_policy(bool target_connected);
@@ -518,6 +528,7 @@ static uint8_t discover_ccc_cb(struct bt_conn *conn, const struct bt_gatt_attr *
             LOG_ERR("bt_gatt_subscribe failed for vh=0x%04x (%d)", pending_report_value_handle, err);
         } else {
             reconnect_fail_count = 0;
+            target_hid_verified = true;
             report_sub_count++;
             LOG_INF("Subscribed Input Report #%u (vh=0x%04x ccc=0x%04x)", report_sub_count,
                     pending_report_value_handle, attr->handle);
@@ -635,6 +646,14 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     LOG_INF("Connected to target");
     gatt_discovery_started = false;
     apply_host_adv_policy(true);
+
+    derr = bt_conn_le_param_update(conn, &target_conn_param);
+    if (derr && derr != -EALREADY) {
+        LOG_WRN("bt_conn_le_param_update request failed (%d)", derr);
+    } else {
+        LOG_INF("Requested stable conn params (30-50ms, lat=0, timeout=8s)");
+    }
+
     derr = bt_conn_set_security(conn, BT_SECURITY_L2);
     if (derr == -EALREADY) {
         gatt_discovery_started = true;
@@ -824,6 +843,10 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
         return;
     }
 
+    if (candidate_list_contains(addr)) {
+        return;
+    }
+
     if (candidate_count < MAX_SCAN_CANDIDATES) {
         bt_addr_le_copy(&candidate_addrs[candidate_count], addr);
         candidate_count++;
@@ -832,6 +855,15 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
     } else {
         LOG_DBG("Candidate list full, dropping additional match");
     }
+}
+
+static bool candidate_list_contains(const bt_addr_le_t *addr) {
+    for (uint8_t i = 0; i < candidate_count; i++) {
+        if (candidate_addrs[i].type == addr->type && bt_addr_eq(&candidate_addrs[i].a, &addr->a)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static int start_scan(void) {
@@ -879,17 +911,46 @@ static int connect_to_candidate(const bt_addr_le_t *addr) {
     return 0;
 }
 
-static bool try_next_candidate_or_rescan(void) {
+static void candidate_connect_work_handler(struct k_work *work) {
     int err;
+    ARG_UNUSED(work);
+
+    if (!in_candidate_sequence || default_conn || connecting || candidate_index >= candidate_count) {
+        return;
+    }
+
+    LOG_INF("Trying candidate %u/%u", (uint8_t)(candidate_index + 1U), candidate_count);
+    err = connect_to_candidate(&candidate_addrs[candidate_index]);
+    if (err) {
+        if (reconnect_fail_count < UINT8_MAX) {
+            reconnect_fail_count++;
+        }
+        (void)try_next_candidate_or_rescan();
+    }
+}
+
+static void schedule_connect_current_candidate(uint32_t delay_ms) {
+    k_work_schedule(&candidate_connect_work, K_MSEC(delay_ms));
+}
+
+static bool try_next_candidate_or_rescan(void) {
+    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_SINGLE_TARGET_ONLY) && target_hid_verified) {
+        LOG_INF("Single-target mode: retry target only after %d ms",
+                CONFIG_ZMK_BLE_HOGP_SNIFFER_NEXT_CONNECT_DELAY_MS);
+        in_candidate_sequence = true;
+        candidate_count = 1;
+        candidate_index = 0;
+        bt_addr_le_copy(&candidate_addrs[0], &target_addr);
+        schedule_connect_current_candidate(CONFIG_ZMK_BLE_HOGP_SNIFFER_NEXT_CONNECT_DELAY_MS);
+        return true;
+    }
 
     if (in_candidate_sequence && (candidate_index + 1U) < candidate_count) {
         candidate_index++;
-        LOG_INF("Trying next candidate %u/%u", (uint8_t)(candidate_index + 1U), candidate_count);
-        err = connect_to_candidate(&candidate_addrs[candidate_index]);
-        if (!err) {
-            return true;
-        }
-        /* Fallthrough to rescan if immediate create failed. */
+        LOG_INF("Queue next candidate %u/%u after %d ms", (uint8_t)(candidate_index + 1U),
+                candidate_count, CONFIG_ZMK_BLE_HOGP_SNIFFER_NEXT_CONNECT_DELAY_MS);
+        schedule_connect_current_candidate(CONFIG_ZMK_BLE_HOGP_SNIFFER_NEXT_CONNECT_DELAY_MS);
+        return true;
     }
 
     in_candidate_sequence = false;
@@ -917,7 +978,10 @@ static void scan_cycle_work_handler(struct k_work *work) {
 
     if (candidate_count == 0U) {
         LOG_DBG("Scan cycle ended without target candidate");
-        schedule_scan_restart();
+        err = start_scan();
+        if (err) {
+            schedule_scan_restart();
+        }
         return;
     }
 
@@ -925,13 +989,7 @@ static void scan_cycle_work_handler(struct k_work *work) {
     candidate_index = 0;
 
     LOG_INF("Scan cycle ended, trying candidate 1/%u", candidate_count);
-    err = connect_to_candidate(&candidate_addrs[candidate_index]);
-    if (err) {
-        if (reconnect_fail_count < UINT8_MAX) {
-            reconnect_fail_count++;
-        }
-        (void)try_next_candidate_or_rescan();
-    }
+    schedule_connect_current_candidate(0U);
 }
 
 static void reconnect_work_handler(struct k_work *work) {
@@ -1041,6 +1099,7 @@ static int ble_hogp_sniffer_init(void) {
     memset(consumer_bit_to_slot, -1, sizeof(consumer_bit_to_slot));
     prev_consumer_slot_count = 0;
     memset(prev_consumer_slots, 0, sizeof(prev_consumer_slots));
+    target_hid_verified = false;
 
     (void)clear_non_target_bonds();
     apply_host_adv_policy(false);
@@ -1064,6 +1123,7 @@ static int ble_hogp_sniffer_schedule_init(void) {
     printk("[hogp] schedule init\r\n");
     k_work_init_delayable(&reconnect_work, reconnect_work_handler);
     k_work_init_delayable(&scan_cycle_work, scan_cycle_work_handler);
+    k_work_init_delayable(&candidate_connect_work, candidate_connect_work_handler);
     k_work_init_delayable(&sniffer_start_work, sniffer_start_work_handler);
     k_work_schedule(&sniffer_start_work, K_SECONDS(3));
     return 0;
