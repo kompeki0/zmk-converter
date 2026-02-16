@@ -87,10 +87,12 @@ static uint16_t pending_report_char_handle;
 static uint16_t pending_report_value_handle;
 static struct bt_gatt_read_params picker_name_read_params;
 static bool picker_name_probe_active;
-static uint8_t picker_probe_indices[MAX_PICKER_DEVICES];
+static bt_addr_le_t picker_unknown_addrs[MAX_PICKER_DEVICES];
+static uint8_t picker_unknown_count;
 static uint8_t picker_probe_count;
 static uint8_t picker_probe_pos;
-static int picker_probe_current_idx;
+static bt_addr_le_t picker_probe_addr;
+static bool picker_probe_addr_valid;
 
 static struct bt_uuid_16 hids_uuid = BT_UUID_INIT_16(BT_UUID_HIDS_VAL);
 static struct bt_uuid_16 report_uuid = BT_UUID_INIT_16(BT_UUID_HIDS_REPORT_VAL);
@@ -119,6 +121,7 @@ static int start_scan(void);
 static int connect_to_candidate(const bt_addr_le_t *addr);
 static bool try_next_candidate_or_rescan(void);
 static bool candidate_list_contains(const bt_addr_le_t *addr);
+static void candidate_same_addr_progress(uint8_t idx, uint8_t *rank, uint8_t *total);
 static void schedule_connect_current_candidate(uint32_t delay_ms);
 static int clear_non_target_bonds(void);
 static void schedule_scan_restart(void);
@@ -127,7 +130,9 @@ static bool should_wait_for_host(void);
 static bool host_ready_for_target_scan(void);
 static bool ad_contains_hids_uuid(const struct net_buf_simple *ad);
 static bool ad_contains_split_service_uuid(const struct net_buf_simple *ad);
-static bool picker_name_is_unknown(const char *name);
+static int picker_unknown_find_index_by_addr(const bt_addr_le_t *addr);
+static void picker_unknown_add_or_update(const bt_addr_le_t *addr);
+static void picker_unknown_remove_by_addr(const bt_addr_le_t *addr);
 static void picker_begin_name_probe(void);
 static void picker_try_next_name_probe(void);
 static uint8_t picker_name_read_cb(struct bt_conn *conn, uint8_t err, struct bt_gatt_read_params *params,
@@ -641,8 +646,41 @@ static int picker_find_index_by_addr(const bt_addr_le_t *addr) {
     return -ENOENT;
 }
 
-static bool picker_name_is_unknown(const char *name) {
-    return (name == NULL || name[0] == '\0' || strncmp(name, "UNK", 3) == 0);
+static int picker_unknown_find_index_by_addr(const bt_addr_le_t *addr) {
+    for (uint8_t i = 0; i < picker_unknown_count; i++) {
+        if (picker_unknown_addrs[i].type == addr->type &&
+            bt_addr_eq(&picker_unknown_addrs[i].a, &addr->a)) {
+            return i;
+        }
+    }
+    return -ENOENT;
+}
+
+static void picker_unknown_add_or_update(const bt_addr_le_t *addr) {
+    if (picker_find_index_by_addr(addr) >= 0) {
+        return;
+    }
+    if (picker_unknown_find_index_by_addr(addr) >= 0) {
+        return;
+    }
+    if (picker_unknown_count >= MAX_PICKER_DEVICES) {
+        return;
+    }
+    bt_addr_le_copy(&picker_unknown_addrs[picker_unknown_count], addr);
+    picker_unknown_count++;
+}
+
+static void picker_unknown_remove_by_addr(const bt_addr_le_t *addr) {
+    int idx = picker_unknown_find_index_by_addr(addr);
+
+    if (idx < 0) {
+        return;
+    }
+
+    for (uint8_t i = (uint8_t)idx; i + 1U < picker_unknown_count; i++) {
+        picker_unknown_addrs[i] = picker_unknown_addrs[i + 1U];
+    }
+    picker_unknown_count--;
 }
 
 static uint8_t picker_item_count(void) { return (uint8_t)(picker_device_count + 2U); }
@@ -734,22 +772,17 @@ static void screen_log_verbose_text(const char *text) {
 #endif
 
 static void picker_add_or_update(const bt_addr_le_t *addr, const char *name, int8_t rssi) {
-    char fallback[PICKER_NAME_MAX];
-    const char *use_name = name;
     int idx = picker_find_index_by_addr(addr);
 
     if (!name || name[0] == '\0') {
-        snprintf(fallback, sizeof(fallback), "UNK%02X%02X%02X", addr->a.val[2], addr->a.val[1],
-                 addr->a.val[0]);
-        use_name = fallback;
+        return;
     }
 
     if (idx >= 0) {
         picker_devices[idx].rssi = rssi;
-        if (picker_devices[idx].name[0] == '\0' && use_name[0] != '\0') {
-            strncpy(picker_devices[idx].name, use_name, sizeof(picker_devices[idx].name) - 1);
-            picker_devices[idx].name[sizeof(picker_devices[idx].name) - 1] = '\0';
-        }
+        strncpy(picker_devices[idx].name, name, sizeof(picker_devices[idx].name) - 1);
+        picker_devices[idx].name[sizeof(picker_devices[idx].name) - 1] = '\0';
+        picker_unknown_remove_by_addr(addr);
         return;
     }
 
@@ -759,13 +792,14 @@ static void picker_add_or_update(const bt_addr_le_t *addr, const char *name, int
 
     bt_addr_le_copy(&picker_devices[picker_device_count].addr, addr);
     picker_devices[picker_device_count].rssi = rssi;
-    strncpy(picker_devices[picker_device_count].name, use_name,
+    strncpy(picker_devices[picker_device_count].name, name,
             sizeof(picker_devices[picker_device_count].name) - 1);
     picker_devices[picker_device_count].name[sizeof(picker_devices[picker_device_count].name) - 1] =
         '\0';
     LOG_INF("Found candidate %u: %s (rssi=%d)", (uint8_t)(picker_device_count + 1U),
             picker_devices[picker_device_count].name, rssi);
     picker_device_count++;
+    picker_unknown_remove_by_addr(addr);
 }
 
 static void picker_try_next_name_probe(void) {
@@ -774,14 +808,10 @@ static void picker_try_next_name_probe(void) {
     }
 
     while (picker_probe_pos < picker_probe_count) {
-        int idx = (int)picker_probe_indices[picker_probe_pos++];
-
-        if (idx < 0 || idx >= picker_device_count) {
-            continue;
-        }
-
-        picker_probe_current_idx = idx;
-        bt_addr_le_copy(&target_addr, &picker_devices[idx].addr);
+        bt_addr_le_copy(&target_addr, &picker_unknown_addrs[picker_probe_pos]);
+        bt_addr_le_copy(&picker_probe_addr, &picker_unknown_addrs[picker_probe_pos]);
+        picker_probe_addr_valid = true;
+        picker_probe_pos++;
         selected_target_valid = true;
         target_any_addr = false;
         target_match_any_type = true;
@@ -810,7 +840,7 @@ static void picker_try_next_name_probe(void) {
     picker_name_probe_active = false;
     picker_probe_count = 0;
     picker_probe_pos = 0;
-    picker_probe_current_idx = -1;
+    picker_probe_addr_valid = false;
     selected_target_valid = false;
     target_hid_verified = false;
     picker_selected_index = 1U;
@@ -819,15 +849,9 @@ static void picker_try_next_name_probe(void) {
 }
 
 static void picker_begin_name_probe(void) {
-    picker_probe_count = 0;
+    picker_probe_count = picker_unknown_count;
     picker_probe_pos = 0;
-    picker_probe_current_idx = -1;
-
-    for (uint8_t i = 0; i < picker_device_count && picker_probe_count < MAX_PICKER_DEVICES; i++) {
-        if (picker_name_is_unknown(picker_devices[i].name)) {
-            picker_probe_indices[picker_probe_count++] = i;
-        }
-    }
+    picker_probe_addr_valid = false;
 
     if (picker_probe_count == 0U) {
         picker_announce_current("other none");
@@ -1567,8 +1591,11 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
     }
 
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_BUTTON_SELECTOR) && !selected_target_valid) {
-        (void)extract_alnum_name(ad, name, sizeof(name));
-        picker_add_or_update(addr, name, rssi);
+        if (extract_alnum_name(ad, name, sizeof(name)) && name[0] != '\0') {
+            picker_add_or_update(addr, name, rssi);
+        } else {
+            picker_unknown_add_or_update(addr);
+        }
         return;
     }
 
@@ -1612,6 +1639,27 @@ static bool candidate_list_contains(const bt_addr_le_t *addr) {
         }
     }
     return false;
+}
+
+static void candidate_same_addr_progress(uint8_t idx, uint8_t *rank, uint8_t *total) {
+    uint8_t r = 0U;
+    uint8_t t = 0U;
+
+    if (!rank || !total || idx >= candidate_count) {
+        return;
+    }
+
+    for (uint8_t i = 0; i < candidate_count; i++) {
+        if (bt_addr_eq(&candidate_addrs[i].a, &candidate_addrs[idx].a)) {
+            t++;
+            if (i <= idx) {
+                r++;
+            }
+        }
+    }
+
+    *rank = r;
+    *total = t;
 }
 
 static int start_scan(void) {
@@ -1691,8 +1739,7 @@ static uint8_t picker_name_read_cb(struct bt_conn *conn, uint8_t err, struct bt_
         return BT_GATT_ITER_STOP;
     }
 
-    if (!err && data && length > 0 && picker_probe_current_idx >= 0 &&
-        picker_probe_current_idx < picker_device_count) {
+    if (!err && data && length > 0 && picker_probe_addr_valid) {
         char name[PICKER_NAME_MAX];
         size_t n = MIN((size_t)length, sizeof(name) - 1U);
 
@@ -1706,11 +1753,9 @@ static uint8_t picker_name_read_cb(struct bt_conn *conn, uint8_t err, struct bt_
         }
 
         if (name[0] != '\0') {
-            strncpy(picker_devices[picker_probe_current_idx].name, name,
-                    sizeof(picker_devices[picker_probe_current_idx].name) - 1U);
-            picker_devices[picker_probe_current_idx].name
-                [sizeof(picker_devices[picker_probe_current_idx].name) - 1U] = '\0';
-            LOG_INF("name probe ok: %s", picker_devices[picker_probe_current_idx].name);
+            picker_add_or_update(&picker_probe_addr, name, 0);
+            picker_unknown_remove_by_addr(&picker_probe_addr);
+            LOG_INF("name probe ok: %s", name);
         }
     } else {
         LOG_WRN("name probe read failed (%u)", err);
@@ -1737,13 +1782,21 @@ static void picker_probe_timeout_work_handler(struct k_work *work) {
 
 static void candidate_connect_work_handler(struct k_work *work) {
     int err;
+    uint8_t same_rank = 0U;
+    uint8_t same_total = 0U;
     ARG_UNUSED(work);
 
     if (!in_candidate_sequence || default_conn || connecting || candidate_index >= candidate_count) {
         return;
     }
 
-    LOG_INF("Trying candidate %u/%u", (uint8_t)(candidate_index + 1U), candidate_count);
+    candidate_same_addr_progress(candidate_index, &same_rank, &same_total);
+    if (same_total > 1U) {
+        LOG_INF("Trying candidate %u/%u (same-mac %u/%u)", (uint8_t)(candidate_index + 1U),
+                candidate_count, same_rank, same_total);
+    } else {
+        LOG_INF("Trying candidate %u/%u", (uint8_t)(candidate_index + 1U), candidate_count);
+    }
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     screen_log_verbose_code("try idx", (uint32_t)(candidate_index + 1U));
 #endif
@@ -1946,7 +1999,8 @@ static void picker_button_work_handler(struct k_work *work) {
                 picker_name_probe_active = false;
                 picker_probe_count = 0;
                 picker_probe_pos = 0;
-                picker_probe_current_idx = -1;
+                picker_probe_addr_valid = false;
+                picker_unknown_count = 0;
                 k_work_cancel_delayable(&picker_probe_timeout_work);
                 selected_target_valid = false;
                 target_any_addr = false;
@@ -1957,6 +2011,7 @@ static void picker_button_work_handler(struct k_work *work) {
                 candidate_index = 0;
                 picker_device_count = 0;
                 picker_selected_index = 0;
+                memset(picker_unknown_addrs, 0, sizeof(picker_unknown_addrs));
                 memset(candidate_addrs, 0, sizeof(candidate_addrs));
 
                 if (default_conn) {
@@ -2003,7 +2058,7 @@ static void picker_button_work_handler(struct k_work *work) {
             picker_name_probe_active = false;
             picker_probe_count = 0;
             picker_probe_pos = 0;
-            picker_probe_current_idx = -1;
+            picker_probe_addr_valid = false;
             k_work_cancel_delayable(&picker_probe_timeout_work);
             selected_target_valid = false;
             target_hid_verified = false;
@@ -2121,6 +2176,7 @@ static int ble_hogp_sniffer_init(void) {
         }
         selected_target_valid = loaded;
         picker_device_count = 0;
+        picker_unknown_count = 0;
         picker_selected_index = 0;
         if (loaded) {
             target_any_addr = false;
@@ -2145,7 +2201,7 @@ static int ble_hogp_sniffer_init(void) {
     picker_name_probe_active = false;
     picker_probe_count = 0;
     picker_probe_pos = 0;
-    picker_probe_current_idx = -1;
+    picker_probe_addr_valid = false;
 
     (void)clear_non_target_bonds();
     apply_host_adv_policy(should_wait_for_host() ? true : false);
