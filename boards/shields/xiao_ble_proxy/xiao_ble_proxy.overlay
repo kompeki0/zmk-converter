@@ -7,10 +7,10 @@
         rows = <1>;
         columns = <118>;
         input-gpios =
-            <&xiao_d 0 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
-            <&xiao_d 1 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
-            <&xiao_d 2 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
-            <&xiao_d 3 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+            <&gpio0 2 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
+            <&gpio0 3 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
+            <&gpio0 28 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
+            <&gpio0 29 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
     };
 
     default_transform: keymap_transform0 {
