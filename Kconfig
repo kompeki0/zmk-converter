@@ -134,6 +134,14 @@ config ZMK_BLE_HOGP_SNIFFER_BLOCK_HOST_ADV_UNTIL_TARGET_CONNECTED
       keyboard connection. Once connected, advertising is resumed so a PC can
       pair/connect.
 
+config ZMK_BLE_HOGP_SNIFFER_BUTTON_SELECTOR
+    bool "Enable 4-button target selector (Up/Down/OK/Back)"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    default y
+    help
+      Use external buttons to choose the target keyboard from discovered
+      candidate names (alnum), then connect/disconnect.
+
 endmenu
 
 config ZMK_PROXY_FACTORY_RESET_ON_BOOT

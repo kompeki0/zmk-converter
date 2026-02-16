@@ -42,6 +42,7 @@ struct hogp_proxy_kscan_data {
 
 static struct hogp_proxy_kscan_data *g_inst;
 int zmk_hogp_proxy_kscan_inject(uint16_t row, uint16_t col, bool pressed);
+int zmk_hogp_sniffer_button_event(uint8_t idx, bool pressed);
 
 static void hogp_proxy_gpio_cb(const struct device *port, struct gpio_callback *cb, uint32_t pins) {
     ARG_UNUSED(port);
@@ -67,6 +68,9 @@ static void hogp_proxy_gpio_cb(const struct device *port, struct gpio_callback *
         }
 
         data->btn_pressed[i] = pressed;
+        if (zmk_hogp_sniffer_button_event(i, pressed) == 0) {
+            continue;
+        }
         (void)zmk_hogp_proxy_kscan_inject(0, (uint16_t)(114 + i), pressed);
     }
 }
