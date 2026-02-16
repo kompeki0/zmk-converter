@@ -124,6 +124,7 @@ static uint8_t discover_report_cb(struct bt_conn *conn, const struct bt_gatt_att
 static void picker_button_work_handler(struct k_work *work);
 static int save_persisted_target_addr(const bt_addr_le_t *addr);
 static int load_persisted_target_addr(bt_addr_le_t *addr, bool *valid);
+static void clear_all_bonds_cb(const struct bt_bond_info *info, void *user_data);
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 static void emit_usage_state(uint8_t usage, bool pressed);
@@ -505,15 +506,27 @@ static int picker_find_index_by_addr(const bt_addr_le_t *addr) {
     return -ENOENT;
 }
 
+static uint8_t picker_item_count(void) { return (uint8_t)(picker_device_count + 1U); }
+
 static void picker_announce_current(const char *prefix) {
     char buf[48];
-    if (picker_device_count == 0U) {
-        LOG_INF("%s none", prefix);
+    uint8_t items = picker_item_count();
+
+    if (picker_selected_index >= items) {
+        picker_selected_index = 0;
+    }
+
+    if (picker_selected_index == 0U) {
+        snprintf(buf, sizeof(buf), "%s 0 RESETALL", prefix);
+        LOG_INF("%s", buf);
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+        type_text_line(buf);
+#endif
         return;
     }
 
-    snprintf(buf, sizeof(buf), "%s %u %s", prefix, (uint32_t)(picker_selected_index + 1U),
-             picker_devices[picker_selected_index].name);
+    snprintf(buf, sizeof(buf), "%s %u %s", prefix, (uint32_t)picker_selected_index,
+             picker_devices[picker_selected_index - 1U].name);
     LOG_INF("%s", buf);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     type_text_line(buf);
@@ -649,6 +662,20 @@ static int load_persisted_target_addr(bt_addr_le_t *addr, bool *valid) {
         *addr = target_addr;
     }
     return 0;
+}
+
+static void clear_all_bonds_cb(const struct bt_bond_info *info, void *user_data) {
+    char addr_str[BT_ADDR_LE_STR_LEN];
+    int err;
+    ARG_UNUSED(user_data);
+
+    err = bt_unpair(BT_ID_DEFAULT, &info->addr);
+    bt_addr_le_to_str(&info->addr, addr_str, sizeof(addr_str));
+    if (err) {
+        LOG_WRN("Failed to clear bond %s (%d)", addr_str, err);
+    } else {
+        LOG_INF("Cleared bond: %s", addr_str);
+    }
 }
 
 static void process_boot_report(const uint8_t *report, size_t report_len) {
@@ -881,6 +908,7 @@ static uint8_t discover_report_cb(struct bt_conn *conn, const struct bt_gatt_att
         } else {
             LOG_INF("Report discovery complete (subscriptions=%u)", report_sub_count);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+            type_text_line("target ready");
             screen_log_verbose_code("sub total", report_sub_count);
 #endif
         }
@@ -1511,6 +1539,7 @@ static void apply_host_adv_policy(bool target_connected) {
 
 static void picker_button_work_handler(struct k_work *work) {
     uint8_t ev;
+    uint8_t items;
     ARG_UNUSED(work);
 
     while (k_msgq_get(&picker_button_msgq, &ev, K_NO_WAIT) == 0) {
@@ -1521,32 +1550,63 @@ static void picker_button_work_handler(struct k_work *work) {
             continue;
         }
 
+        items = picker_item_count();
+        if (picker_selected_index >= items) {
+            picker_selected_index = 0;
+        }
+
         switch (idx) {
         case 0: /* Up */
-            if (picker_device_count > 0U) {
+            if (items > 0U) {
                 if (picker_selected_index == 0U) {
-                    picker_selected_index = (uint8_t)(picker_device_count - 1U);
+                    picker_selected_index = (uint8_t)(items - 1U);
                 } else {
                     picker_selected_index--;
                 }
-                picker_announce_current("sel");
             }
+            picker_announce_current("sel");
             break;
 
         case 1: /* Down */
-            if (picker_device_count > 0U) {
-                picker_selected_index = (uint8_t)((picker_selected_index + 1U) % picker_device_count);
-                picker_announce_current("sel");
+            if (items > 0U) {
+                picker_selected_index = (uint8_t)((picker_selected_index + 1U) % items);
             }
+            picker_announce_current("sel");
             break;
 
         case 2: /* OK */
-            if (picker_device_count == 0U) {
-                picker_announce_current("sel");
+            if (picker_selected_index == 0U) {
+                LOG_INF("Running full connection reset");
+                bt_foreach_bond(BT_ID_DEFAULT, clear_all_bonds_cb, NULL);
+                (void)settings_delete("ble_hogp_sniffer/target_addr");
+
+                selected_target_valid = false;
+                target_any_addr = false;
+                target_hid_verified = false;
+                reconnect_fail_count = 0;
+                in_candidate_sequence = false;
+                candidate_count = 0;
+                candidate_index = 0;
+                picker_device_count = 0;
+                picker_selected_index = 0;
+                memset(candidate_addrs, 0, sizeof(candidate_addrs));
+
+                if (default_conn) {
+                    (void)bt_conn_disconnect(default_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+                } else {
+                    apply_host_adv_policy(should_wait_for_host() ? true : false);
+                    (void)start_scan();
+                }
+                picker_announce_current("reset");
                 break;
             }
 
-            bt_addr_le_copy(&target_addr, &picker_devices[picker_selected_index].addr);
+            if (default_conn || connecting) {
+                picker_announce_current("busy");
+                break;
+            }
+
+            bt_addr_le_copy(&target_addr, &picker_devices[picker_selected_index - 1U].addr);
             selected_target_valid = true;
             target_hid_verified = false;
             reconnect_fail_count = 0;
@@ -1566,7 +1626,7 @@ static void picker_button_work_handler(struct k_work *work) {
                 scanning = false;
             }
 
-            if (!default_conn && !connecting) {
+            {
                 int cerr = connect_to_candidate(&target_addr);
                 if (cerr) {
                     schedule_scan_restart();
