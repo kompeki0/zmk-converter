@@ -89,3 +89,13 @@ config ZMK_BLE_HOGP_SNIFFER_BLOCK_HOST_ADV_UNTIL_TARGET_CONNECTED
       pair/connect.
 
 endmenu
+
+config ZMK_PROXY_FACTORY_RESET_ON_BOOT
+    bool "Factory reset storage partition on boot (one-shot)"
+    depends on BT
+    depends on FLASH_MAP
+    default n
+    help
+      One-shot maintenance mode. On boot, unpair all BLE peers and erase the
+      storage partition used by settings/bonds, then keep running.
+      Use only for recovery and immediately flash normal firmware afterward.

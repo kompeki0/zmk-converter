@@ -41,3 +41,10 @@ include:
       -DCONFIG_SERIAL=y
       -DCONFIG_CONSOLE=y
       -DCONFIG_UART_CONSOLE=y
+
+  - board: seeeduino_xiao_ble
+    shield: xiao_ble_proxy
+    artifact-name: xiao_ble_proxy_factory_reset
+    cmake-args: >
+      -DCONFIG_ZMK_PROXY_FACTORY_RESET_ON_BOOT=y
+      -DCONFIG_ZMK_BLE_HOGP_SNIFFER=n
