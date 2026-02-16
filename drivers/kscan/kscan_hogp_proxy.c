@@ -24,7 +24,6 @@ struct hogp_proxy_kscan_event {
 struct hogp_proxy_kscan_config {
     uint16_t rows;
     uint16_t cols;
-    struct gpio_dt_spec buttons[4];
 };
 
 struct hogp_proxy_kscan_data {
@@ -35,7 +34,9 @@ struct hogp_proxy_kscan_data {
     struct k_msgq msgq;
     struct hogp_proxy_kscan_event qbuf[32];
     struct k_work work;
-    struct gpio_callback gpio_cbs[4];
+    const struct device *gpio_dev;
+    uint8_t button_pins[4];
+    struct gpio_callback gpio_cb;
     bool btn_pressed[4];
 };
 
@@ -44,27 +45,28 @@ int zmk_hogp_proxy_kscan_inject(uint16_t row, uint16_t col, bool pressed);
 
 static void hogp_proxy_gpio_cb(const struct device *port, struct gpio_callback *cb, uint32_t pins) {
     ARG_UNUSED(port);
-    ARG_UNUSED(cb);
-    ARG_UNUSED(pins);
-
-    if (!g_inst) {
+    struct hogp_proxy_kscan_data *data = CONTAINER_OF(cb, struct hogp_proxy_kscan_data, gpio_cb);
+    if (!data || !data->gpio_dev) {
         return;
     }
 
-    const struct hogp_proxy_kscan_config *cfg = g_inst->dev->config;
+    for (uint8_t i = 0; i < ARRAY_SIZE(data->button_pins); i++) {
+        uint8_t pin = data->button_pins[i];
+        if ((pins & BIT(pin)) == 0U) {
+            continue;
+        }
 
-    for (uint8_t i = 0; i < ARRAY_SIZE(cfg->buttons); i++) {
-        int val = gpio_pin_get_dt(&cfg->buttons[i]);
+        int val = gpio_pin_get(data->gpio_dev, pin);
         if (val < 0) {
             continue;
         }
 
-        bool pressed = (val > 0);
-        if (pressed == g_inst->btn_pressed[i]) {
+        bool pressed = (val == 0); /* Active low with pull-up */
+        if (pressed == data->btn_pressed[i]) {
             continue;
         }
 
-        g_inst->btn_pressed[i] = pressed;
+        data->btn_pressed[i] = pressed;
         (void)zmk_hogp_proxy_kscan_inject(0, (uint16_t)(114 + i), pressed);
     }
 }
@@ -107,6 +109,8 @@ static const struct kscan_driver_api hogp_proxy_kscan_api = {
 static int hogp_proxy_kscan_init(const struct device *dev) {
     const struct hogp_proxy_kscan_config *cfg = dev->config;
     struct hogp_proxy_kscan_data *data = dev->data;
+    static const uint8_t default_button_pins[4] = {2, 3, 28, 29};
+    uint32_t pin_mask = 0U;
 
     if (cfg->rows == 0 || cfg->cols == 0) {
         return -EINVAL;
@@ -119,33 +123,39 @@ static int hogp_proxy_kscan_init(const struct device *dev) {
     k_msgq_init(&data->msgq, (char *)data->qbuf, sizeof(data->qbuf[0]), ARRAY_SIZE(data->qbuf));
     k_work_init(&data->work, hogp_proxy_kscan_work_handler);
 
-    for (uint8_t i = 0; i < ARRAY_SIZE(cfg->buttons); i++) {
-        if (!gpio_is_ready_dt(&cfg->buttons[i])) {
-            LOG_ERR("button %u GPIO not ready", i);
-            return -ENODEV;
-        }
+    data->gpio_dev = DEVICE_DT_GET(DT_NODELABEL(gpio0));
+    if (!device_is_ready(data->gpio_dev)) {
+        LOG_ERR("gpio0 device not ready");
+        return -ENODEV;
+    }
 
-        int err = gpio_pin_configure_dt(&cfg->buttons[i], GPIO_INPUT);
+    for (uint8_t i = 0; i < ARRAY_SIZE(default_button_pins); i++) {
+        uint8_t pin = default_button_pins[i];
+        data->button_pins[i] = pin;
+
+        int err = gpio_pin_configure(data->gpio_dev, pin, GPIO_INPUT | GPIO_PULL_UP);
         if (err) {
             LOG_ERR("button %u configure failed (%d)", i, err);
             return err;
         }
 
-        err = gpio_pin_interrupt_configure_dt(&cfg->buttons[i], GPIO_INT_EDGE_BOTH);
+        err = gpio_pin_interrupt_configure(data->gpio_dev, pin, GPIO_INT_EDGE_BOTH);
         if (err) {
             LOG_ERR("button %u irq config failed (%d)", i, err);
             return err;
         }
 
-        gpio_init_callback(&data->gpio_cbs[i], hogp_proxy_gpio_cb, BIT(cfg->buttons[i].pin));
-        err = gpio_add_callback(cfg->buttons[i].port, &data->gpio_cbs[i]);
-        if (err) {
-            LOG_ERR("button %u add callback failed (%d)", i, err);
-            return err;
-        }
+        pin_mask |= BIT(pin);
 
-        int val = gpio_pin_get_dt(&cfg->buttons[i]);
-        data->btn_pressed[i] = (val > 0);
+        int val = gpio_pin_get(data->gpio_dev, pin);
+        data->btn_pressed[i] = (val == 0);
+    }
+
+    gpio_init_callback(&data->gpio_cb, hogp_proxy_gpio_cb, pin_mask);
+    int err = gpio_add_callback(data->gpio_dev, &data->gpio_cb);
+    if (err) {
+        LOG_ERR("add gpio callback failed (%d)", err);
+        return err;
     }
 
     g_inst = data;
@@ -187,13 +197,6 @@ BUILD_ASSERT(DT_NUM_INST_STATUS_OKAY(zmk_kscan_hogp_proxy) <= 1,
 static const struct hogp_proxy_kscan_config hogp_proxy_kscan_cfg = {
     .rows = HOGP_PROXY_ROWS,
     .cols = HOGP_PROXY_COLS,
-    .buttons =
-        {
-            GPIO_DT_SPEC_GET_BY_IDX(HOGP_PROXY_KSCAN_NODE, input_gpios, 0),
-            GPIO_DT_SPEC_GET_BY_IDX(HOGP_PROXY_KSCAN_NODE, input_gpios, 1),
-            GPIO_DT_SPEC_GET_BY_IDX(HOGP_PROXY_KSCAN_NODE, input_gpios, 2),
-            GPIO_DT_SPEC_GET_BY_IDX(HOGP_PROXY_KSCAN_NODE, input_gpios, 3),
-        },
 };
 
 static struct hogp_proxy_kscan_data hogp_proxy_kscan_data;
