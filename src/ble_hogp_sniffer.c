@@ -87,8 +87,9 @@ static bool host_adv_blocked;
 static bool host_connected;
 static bool target_hid_verified;
 static int64_t next_connect_allowed_ms;
-static bool force_l1_next_connect;
-static uint8_t auth_fail_streak;
+static bool sec_policy_cycle_active;
+static uint8_t sec_policy_try_idx;
+static int64_t last_sec_policy_step_ms;
 static uint8_t report_sub_count;
 static uint16_t pending_report_char_handle;
 static uint16_t pending_report_value_handle;
@@ -165,6 +166,7 @@ static int load_persisted_target_meta(uint8_t *sec_level_hint, char *name, bool 
 static void clear_all_bonds_cb(const struct bt_bond_info *info, void *user_data);
 static const char *hci_reason_to_str(uint8_t reason);
 static const char *sec_err_to_str(enum bt_security_err err);
+static void step_security_policy_on_failure(int reason_code, const char *tag);
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 static void emit_usage_state(uint8_t usage, bool pressed);
@@ -417,15 +419,49 @@ static const char *sec_err_to_str(enum bt_security_err err) {
 }
 
 static bt_security_t get_desired_security_level(void) {
-    bt_security_t level = (bt_security_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_SECURITY_LEVEL;
+    if (sec_policy_cycle_active) {
+        switch (sec_policy_try_idx) {
+        case 0:
+            return BT_SECURITY_L3;
+        case 1:
+            return BT_SECURITY_L2;
+        default:
+            return BT_SECURITY_L1;
+        }
+    }
 
     if (target_sec_hint_valid) {
-        level = (bt_security_t)target_sec_level_hint;
+        return (bt_security_t)target_sec_level_hint;
     }
-    if (force_l1_next_connect && level > BT_SECURITY_L1) {
-        level = BT_SECURITY_L1;
+
+    return (bt_security_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_SECURITY_LEVEL;
+}
+
+static void step_security_policy_on_failure(int reason_code, const char *tag) {
+    int64_t now = k_uptime_get();
+
+    /* Pairing callbacks and security_changed can report the same failure. */
+    if ((now - last_sec_policy_step_ms) < 500) {
+        return;
     }
-    return level;
+    last_sec_policy_step_ms = now;
+
+    if (!sec_policy_cycle_active) {
+        sec_policy_cycle_active = true;
+        sec_policy_try_idx = 0;
+    } else if (sec_policy_try_idx < 2U) {
+        sec_policy_try_idx++;
+    }
+
+    next_connect_allowed_ms = now + (int64_t)(3000U * (uint32_t)(sec_policy_try_idx + 1U));
+    LOG_WRN("%s: security policy next L%u (step %u/3), cooldown=%lldms", tag,
+            (uint32_t)get_desired_security_level(), (uint32_t)(sec_policy_try_idx + 1U),
+            (long long)(next_connect_allowed_ms - now));
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+    screen_log_target_reason("sec policy", (uint8_t)get_desired_security_level(),
+                             "next security level");
+#endif
+    ARG_UNUSED(reason_code);
 }
 
 static void append_usage_unique(uint8_t *usages, size_t *count, uint8_t usage) {
@@ -1407,10 +1443,10 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     }
 
     LOG_INF("Connected to target");
-    if (force_l1_next_connect && wanted_sec == BT_SECURITY_L1) {
-        LOG_WRN("Using temporary security fallback L1 after auth failure");
+    if (sec_policy_cycle_active) {
+        LOG_WRN("Using security policy step L%u", (uint32_t)wanted_sec);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-        type_text_line("sec fallback l1");
+        type_text_line("sec policy step");
 #endif
     }
     target_ready_announced = false;
@@ -1575,17 +1611,7 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
         screen_log_verbose_code("sec err", (uint32_t)err);
         type_text_line("target sec fail");
 #endif
-        if ((int)err == 4) {
-            /* Typical auth requirement mismatch. Slow down retries and try L1 once. */
-            if (auth_fail_streak < UINT8_MAX) {
-                auth_fail_streak++;
-            }
-            force_l1_next_connect = true;
-            next_connect_allowed_ms =
-                k_uptime_get() + (int64_t)MIN((uint32_t)auth_fail_streak * 3000U, 12000U);
-            LOG_WRN("Auth requirement mismatch, cooldown=%lldms, fallback L1 next",
-                    (long long)(next_connect_allowed_ms - k_uptime_get()));
-        }
+        step_security_policy_on_failure((int)err, "security_failed");
         if (!gatt_discovery_started) {
             LOG_WRN("Security failed; trying HID discovery fallback");
             gatt_discovery_started = true;
@@ -1605,8 +1631,8 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
         return;
     }
 
-    force_l1_next_connect = false;
-    auth_fail_streak = 0U;
+    sec_policy_cycle_active = false;
+    sec_policy_try_idx = 0U;
     target_sec_level_hint = (uint8_t)level;
     target_sec_hint_valid = true;
     (void)save_persisted_target_meta(target_sec_level_hint, target_name, target_name_valid);
@@ -1633,14 +1659,7 @@ static void pairing_complete_cb(struct bt_conn *conn, bool bonded) {
 static void pairing_failed_cb(struct bt_conn *conn, enum bt_security_err reason) {
     ARG_UNUSED(conn);
     LOG_WRN("Pairing failed (reason=%d: %s)", (int)reason, sec_err_to_str(reason));
-    if ((int)reason == 4) {
-        if (auth_fail_streak < UINT8_MAX) {
-            auth_fail_streak++;
-        }
-        force_l1_next_connect = true;
-        next_connect_allowed_ms =
-            k_uptime_get() + (int64_t)MIN((uint32_t)auth_fail_streak * 3000U, 12000U);
-    }
+    step_security_policy_on_failure((int)reason, "pair_failed");
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     screen_log_target_reason("pair fail", (uint8_t)reason, sec_err_to_str(reason));
 #endif
@@ -2182,8 +2201,9 @@ static void picker_button_work_handler(struct k_work *work) {
                 target_name[0] = '\0';
                 target_name_valid = false;
                 target_sec_hint_valid = false;
-                force_l1_next_connect = false;
-                auth_fail_streak = 0U;
+                sec_policy_cycle_active = false;
+                sec_policy_try_idx = 0U;
+                last_sec_policy_step_ms = 0;
                 reconnect_fail_count = 0;
                 in_candidate_sequence = false;
                 candidate_count = 0;
@@ -2217,11 +2237,21 @@ static void picker_button_work_handler(struct k_work *work) {
                 break;
             }
 
+            {
+                const char *new_name = picker_devices[picker_selected_index - 2U].name;
+                bool same_name = (target_name_valid && strcmp(target_name, new_name) == 0);
+                if (!same_name) {
+                    target_sec_hint_valid = false;
+                }
+            }
             bt_addr_le_copy(&target_addr, &picker_devices[picker_selected_index - 2U].addr);
             strncpy(target_name, picker_devices[picker_selected_index - 2U].name,
                     sizeof(target_name) - 1U);
             target_name[sizeof(target_name) - 1U] = '\0';
             target_name_valid = (target_name[0] != '\0');
+            sec_policy_cycle_active = false;
+            sec_policy_try_idx = 0U;
+            last_sec_policy_step_ms = 0;
             selected_target_valid = true;
             target_any_addr = false;
             target_match_any_type = true;
@@ -2248,8 +2278,9 @@ static void picker_button_work_handler(struct k_work *work) {
             target_name[0] = '\0';
             target_name_valid = false;
             target_sec_hint_valid = false;
-            force_l1_next_connect = false;
-            auth_fail_streak = 0U;
+            sec_policy_cycle_active = false;
+            sec_policy_try_idx = 0U;
+            last_sec_policy_step_ms = 0;
             in_candidate_sequence = false;
             candidate_count = 0;
             candidate_index = 0;
@@ -2399,8 +2430,9 @@ static int ble_hogp_sniffer_init(void) {
     memset(prev_consumer_slots, 0, sizeof(prev_consumer_slots));
     target_hid_verified = false;
     next_connect_allowed_ms = 0;
-    force_l1_next_connect = false;
-    auth_fail_streak = 0U;
+    sec_policy_cycle_active = false;
+    sec_policy_try_idx = 0U;
+    last_sec_policy_step_ms = 0;
     picker_name_probe_active = false;
     picker_probe_count = 0;
     picker_probe_pos = 0;
