@@ -108,15 +108,20 @@ int zmk_hogp_proxy_kscan_inject(uint16_t row, uint16_t col, bool pressed) {
     return 0;
 }
 
-/* Single instance, referenced via /chosen zmk,kscan */
+/* Single instance, referenced via /chosen zmk,kscan.
+ * Avoid DT_PROP(rows/columns) for now: some ZMK/Zephyr setups won't pick up
+ * external bindings, causing property macros to be missing at compile-time.
+ */
 #define HOGP_PROXY_KSCAN_NODE DT_INST(0, zmk_kscan_hogp_proxy)
+#define HOGP_PROXY_ROWS 1
+#define HOGP_PROXY_COLS 34
 
 BUILD_ASSERT(DT_NUM_INST_STATUS_OKAY(zmk_kscan_hogp_proxy) <= 1,
              "Only one zmk,kscan-hogp-proxy instance is supported");
 
 static const struct hogp_proxy_kscan_config hogp_proxy_kscan_cfg = {
-    .rows = DT_PROP(HOGP_PROXY_KSCAN_NODE, rows),
-    .cols = DT_PROP(HOGP_PROXY_KSCAN_NODE, columns),
+    .rows = HOGP_PROXY_ROWS,
+    .cols = HOGP_PROXY_COLS,
 };
 
 static struct hogp_proxy_kscan_data hogp_proxy_kscan_data;
@@ -124,4 +129,3 @@ static struct hogp_proxy_kscan_data hogp_proxy_kscan_data;
 DEVICE_DT_DEFINE(HOGP_PROXY_KSCAN_NODE, hogp_proxy_kscan_init, NULL, &hogp_proxy_kscan_data,
                  &hogp_proxy_kscan_cfg, POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,
                  &hogp_proxy_kscan_api);
-
