@@ -41,7 +41,7 @@
          * Layer 1: reference layer using &kp defaults aligned to usage_order[].
          * Not auto-selected; this is for easier visual editing/copy.
          */
-        reference_layer {
+        reference_layer1 {
             bindings = <
                 /* 0..15 */
                 &kp ESC   &kp F1    &kp F2    &kp F3    &kp F4    &kp F5    &kp F6    &kp F7
