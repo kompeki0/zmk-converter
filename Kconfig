@@ -147,7 +147,7 @@ config ZMK_BLE_HOGP_SNIFFER_BUTTON_SELECTOR
 config ZMK_BLE_HOGP_SNIFFER_WAIT_FOR_HOST_BEFORE_TARGET_SCAN
     bool "Wait host-PC connection before scanning target keyboard"
     depends on ZMK_BLE_HOGP_SNIFFER
-    default n
+    default y
     help
       If enabled, keep host BLE advertising active and defer target keyboard
       scanning until a host PC is connected to this device.

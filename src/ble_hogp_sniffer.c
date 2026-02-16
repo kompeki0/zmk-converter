@@ -12,6 +12,7 @@
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/settings/settings.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
@@ -97,6 +98,13 @@ static size_t prev_usage_count;
 static uint8_t prev_consumer_slots[CONSUMER_SLOT_COUNT];
 static size_t prev_consumer_slot_count;
 
+struct persisted_target_addr {
+    uint8_t type;
+    uint8_t a[6];
+};
+
+static bool persisted_target_valid;
+
 static int start_scan(void);
 static int connect_to_candidate(const bt_addr_le_t *addr);
 static bool try_next_candidate_or_rescan(void);
@@ -113,6 +121,8 @@ static int resume_report_discovery(struct bt_conn *conn, uint16_t next_start_han
 static uint8_t discover_report_cb(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                                   struct bt_gatt_discover_params *params);
 static void picker_button_work_handler(struct k_work *work);
+static int save_persisted_target_addr(const bt_addr_le_t *addr);
+static int load_persisted_target_addr(bt_addr_le_t *addr, bool *valid);
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 static void emit_usage_state(uint8_t usage, bool pressed);
@@ -481,6 +491,27 @@ static void picker_announce_current(const char *prefix) {
 #endif
 }
 
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+static void screen_log_target_addr(const char *prefix, const bt_addr_le_t *addr) {
+    char line[64];
+    char addr_str[BT_ADDR_LE_STR_LEN];
+
+    if (!addr) {
+        return;
+    }
+
+    bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
+    snprintf(line, sizeof(line), "%s %s", prefix, addr_str);
+    type_text_line(line);
+}
+
+static void screen_log_target_code(const char *prefix, uint8_t code) {
+    char line[64];
+    snprintf(line, sizeof(line), "%s %u", prefix, (uint32_t)code);
+    type_text_line(line);
+}
+#endif
+
 static void picker_add_or_update(const bt_addr_le_t *addr, const char *name, int8_t rssi) {
     int idx = picker_find_index_by_addr(addr);
 
@@ -506,6 +537,73 @@ static void picker_add_or_update(const bt_addr_le_t *addr, const char *name, int
     LOG_INF("Found candidate %u: %s (rssi=%d)", (uint8_t)(picker_device_count + 1U),
             picker_devices[picker_device_count].name, rssi);
     picker_device_count++;
+}
+
+static int settings_set_target_addr(const char *name, size_t len_rd, settings_read_cb read_cb,
+                                    void *cb_arg) {
+    struct persisted_target_addr raw;
+    int len;
+
+    if (strcmp(name, "target_addr") != 0) {
+        return -ENOENT;
+    }
+
+    if (len_rd != sizeof(raw)) {
+        return -EINVAL;
+    }
+
+    len = read_cb(cb_arg, &raw, sizeof(raw));
+    if (len != sizeof(raw)) {
+        return -EIO;
+    }
+
+    if (raw.type != BT_ADDR_LE_PUBLIC && raw.type != BT_ADDR_LE_RANDOM) {
+        persisted_target_valid = false;
+        return -EINVAL;
+    }
+
+    target_addr.type = raw.type;
+    memcpy(target_addr.a.val, raw.a, sizeof(raw.a));
+    persisted_target_valid = true;
+    return 0;
+}
+
+static int settings_commit_target_addr(void) { return 0; }
+
+SETTINGS_STATIC_HANDLER_DEFINE(ble_hogp_sniffer, "ble_hogp_sniffer", NULL, settings_set_target_addr,
+                               settings_commit_target_addr, NULL);
+
+static int save_persisted_target_addr(const bt_addr_le_t *addr) {
+    struct persisted_target_addr raw;
+
+    if (!addr) {
+        return -EINVAL;
+    }
+
+    raw.type = addr->type;
+    memcpy(raw.a, addr->a.val, sizeof(raw.a));
+    return settings_save_one("ble_hogp_sniffer/target_addr", &raw, sizeof(raw));
+}
+
+static int load_persisted_target_addr(bt_addr_le_t *addr, bool *valid) {
+    int err;
+
+    if (!addr || !valid) {
+        return -EINVAL;
+    }
+
+    persisted_target_valid = false;
+    err = settings_load_subtree("ble_hogp_sniffer");
+    if (err) {
+        *valid = false;
+        return err;
+    }
+
+    *valid = persisted_target_valid;
+    if (*valid) {
+        *addr = target_addr;
+    }
+    return 0;
 }
 
 static void process_boot_report(const uint8_t *report, size_t report_len) {
@@ -799,6 +897,7 @@ static int discover_hids(struct bt_conn *conn) {
 
 static void connected_cb(struct bt_conn *conn, uint8_t err) {
     int derr;
+    const bt_addr_le_t *peer = bt_conn_get_dst(conn);
     struct bt_conn_info info = {0};
     bool is_peripheral = (bt_conn_get_info(conn, &info) == 0 && info.role == BT_CONN_ROLE_PERIPHERAL);
 
@@ -817,6 +916,9 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
 
     if (err) {
         LOG_ERR("Connection failed (err 0x%02x)", err);
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+        screen_log_target_code("target connect err", err);
+#endif
         bt_conn_unref(default_conn);
         default_conn = NULL;
         if (reconnect_fail_count < UINT8_MAX) {
@@ -827,6 +929,20 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     }
 
     LOG_INF("Connected to target");
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+    screen_log_target_addr("target connected", peer);
+#endif
+    if (peer) {
+        target_addr = *peer;
+        selected_target_valid = true;
+        target_any_addr = false;
+        int serr = save_persisted_target_addr(peer);
+        if (serr) {
+            LOG_WRN("Failed to persist target addr (%d)", serr);
+        } else {
+            LOG_INF("Persisted target addr");
+        }
+    }
     gatt_discovery_started = false;
     apply_host_adv_policy(true);
 
@@ -867,6 +983,7 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
 }
 
 static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
+    const bt_addr_le_t *peer = bt_conn_get_dst(conn);
     struct bt_conn_info info = {0};
     bool is_peripheral = (bt_conn_get_info(conn, &info) == 0 && info.role == BT_CONN_ROLE_PERIPHERAL);
 
@@ -879,6 +996,10 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
     }
 
     LOG_INF("Disconnected (reason 0x%02x)", reason);
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+    screen_log_target_addr("target disconnected", peer);
+    screen_log_target_code("target disc reason", reason);
+#endif
 
     bt_conn_unref(default_conn);
     default_conn = NULL;
@@ -1440,13 +1561,26 @@ static int ble_hogp_sniffer_init(void) {
         return err;
     }
 
+    /* Ensure host advertising state machine is nudged at boot. */
+    (void)zmk_ble_set_device_name((char *)CONFIG_BT_DEVICE_NAME);
+
     target_any_addr = false;
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_BUTTON_SELECTOR)) {
-        selected_target_valid = false;
-        memset(&target_addr, 0, sizeof(target_addr));
+        bool loaded = false;
+        int lerr = load_persisted_target_addr(&target_addr, &loaded);
+        if (lerr) {
+            LOG_WRN("Persisted target load failed (%d)", lerr);
+        }
+        selected_target_valid = loaded;
         picker_device_count = 0;
         picker_selected_index = 0;
-        LOG_INF("Button selector mode enabled (Up/Down/OK/Back)");
+        if (loaded) {
+            target_any_addr = false;
+            LOG_INF("Button selector mode: restored last target");
+        } else {
+            memset(&target_addr, 0, sizeof(target_addr));
+            LOG_INF("Button selector mode enabled (Up/Down/OK/Back)");
+        }
     } else {
         err = parse_target_addr();
         if (err) {
