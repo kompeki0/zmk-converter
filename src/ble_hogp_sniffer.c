@@ -36,6 +36,7 @@ LOG_MODULE_REGISTER(ble_hogp_sniffer, CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_LEVEL);
 #define PICKER_NAME_MAX 20
 #define CONSUMER_SLOT_BASE 104
 #define CONSUMER_SLOT_COUNT 10
+#define TARGET_NAME_MAX PICKER_NAME_MAX
 
 static struct bt_conn *default_conn;
 static struct bt_gatt_discover_params discover_params;
@@ -44,6 +45,10 @@ static bt_addr_le_t target_addr;
 static bool selected_target_valid;
 static bool target_any_addr;
 static bool target_match_any_type;
+static char target_name[TARGET_NAME_MAX];
+static bool target_name_valid;
+static uint8_t target_sec_level_hint;
+static bool target_sec_hint_valid;
 static bt_addr_le_t candidate_addrs[MAX_SCAN_CANDIDATES];
 struct picker_device {
     bt_addr_le_t addr;
@@ -82,6 +87,8 @@ static bool host_adv_blocked;
 static bool host_connected;
 static bool target_hid_verified;
 static int64_t next_connect_allowed_ms;
+static bool force_l1_next_connect;
+static uint8_t auth_fail_streak;
 static uint8_t report_sub_count;
 static uint16_t pending_report_char_handle;
 static uint16_t pending_report_value_handle;
@@ -116,7 +123,14 @@ struct persisted_target_addr {
     uint8_t a[6];
 };
 
+struct persisted_target_meta {
+    uint8_t sec_level_hint;
+    uint8_t has_name;
+    char name[TARGET_NAME_MAX];
+};
+
 static bool persisted_target_valid;
+static bool persisted_target_meta_valid;
 
 static int start_scan(void);
 static int connect_to_candidate(const bt_addr_le_t *addr);
@@ -145,6 +159,9 @@ static uint8_t discover_report_cb(struct bt_conn *conn, const struct bt_gatt_att
 static void picker_button_work_handler(struct k_work *work);
 static int save_persisted_target_addr(const bt_addr_le_t *addr);
 static int load_persisted_target_addr(bt_addr_le_t *addr, bool *valid);
+static int save_persisted_target_meta(uint8_t sec_level_hint, const char *name, bool has_name);
+static int load_persisted_target_meta(uint8_t *sec_level_hint, char *name, bool *has_name,
+                                      bool *valid);
 static void clear_all_bonds_cb(const struct bt_bond_info *info, void *user_data);
 static const char *hci_reason_to_str(uint8_t reason);
 static const char *sec_err_to_str(enum bt_security_err err);
@@ -397,6 +414,18 @@ static const char *sec_err_to_str(enum bt_security_err err) {
         }
         return "unknown";
     }
+}
+
+static bt_security_t get_desired_security_level(void) {
+    bt_security_t level = (bt_security_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_SECURITY_LEVEL;
+
+    if (target_sec_hint_valid) {
+        level = (bt_security_t)target_sec_level_hint;
+    }
+    if (force_l1_next_connect && level > BT_SECURITY_L1) {
+        level = BT_SECURITY_L1;
+    }
+    return level;
 }
 
 static void append_usage_unique(uint8_t *usages, size_t *count, uint8_t usage) {
@@ -876,30 +905,54 @@ static void picker_begin_name_probe(void) {
 static int settings_set_target_addr(const char *name, size_t len_rd, settings_read_cb read_cb,
                                     void *cb_arg) {
     struct persisted_target_addr raw;
+    struct persisted_target_meta meta;
     int len;
 
-    if (strcmp(name, "target_addr") != 0) {
-        return -ENOENT;
+    if (strcmp(name, "target_addr") == 0) {
+        if (len_rd != sizeof(raw)) {
+            return -EINVAL;
+        }
+
+        len = read_cb(cb_arg, &raw, sizeof(raw));
+        if (len != sizeof(raw)) {
+            return -EIO;
+        }
+
+        if (raw.type != BT_ADDR_LE_PUBLIC && raw.type != BT_ADDR_LE_RANDOM) {
+            persisted_target_valid = false;
+            return -EINVAL;
+        }
+
+        target_addr.type = raw.type;
+        memcpy(target_addr.a.val, raw.a, sizeof(raw.a));
+        persisted_target_valid = true;
+        return 0;
     }
 
-    if (len_rd != sizeof(raw)) {
-        return -EINVAL;
+    if (strcmp(name, "target_meta") == 0) {
+        if (len_rd != sizeof(meta)) {
+            return -EINVAL;
+        }
+
+        len = read_cb(cb_arg, &meta, sizeof(meta));
+        if (len != sizeof(meta)) {
+            return -EIO;
+        }
+
+        target_sec_level_hint = meta.sec_level_hint;
+        target_sec_hint_valid =
+            (target_sec_level_hint >= BT_SECURITY_L1 && target_sec_level_hint <= BT_SECURITY_L4);
+        target_name_valid = false;
+        if (meta.has_name) {
+            strncpy(target_name, meta.name, sizeof(target_name) - 1U);
+            target_name[sizeof(target_name) - 1U] = '\0';
+            target_name_valid = (target_name[0] != '\0');
+        }
+        persisted_target_meta_valid = true;
+        return 0;
     }
 
-    len = read_cb(cb_arg, &raw, sizeof(raw));
-    if (len != sizeof(raw)) {
-        return -EIO;
-    }
-
-    if (raw.type != BT_ADDR_LE_PUBLIC && raw.type != BT_ADDR_LE_RANDOM) {
-        persisted_target_valid = false;
-        return -EINVAL;
-    }
-
-    target_addr.type = raw.type;
-    memcpy(target_addr.a.val, raw.a, sizeof(raw.a));
-    persisted_target_valid = true;
-    return 0;
+    return -ENOENT;
 }
 
 static int settings_commit_target_addr(void) { return 0; }
@@ -919,6 +972,19 @@ static int save_persisted_target_addr(const bt_addr_le_t *addr) {
     return settings_save_one("ble_hogp_sniffer/target_addr", &raw, sizeof(raw));
 }
 
+static int save_persisted_target_meta(uint8_t sec_level_hint, const char *name, bool has_name) {
+    struct persisted_target_meta meta = {0};
+
+    meta.sec_level_hint = sec_level_hint;
+    meta.has_name = has_name ? 1U : 0U;
+    if (has_name && name) {
+        strncpy(meta.name, name, sizeof(meta.name) - 1U);
+        meta.name[sizeof(meta.name) - 1U] = '\0';
+    }
+
+    return settings_save_one("ble_hogp_sniffer/target_meta", &meta, sizeof(meta));
+}
+
 static int load_persisted_target_addr(bt_addr_le_t *addr, bool *valid) {
     int err;
 
@@ -936,6 +1002,35 @@ static int load_persisted_target_addr(bt_addr_le_t *addr, bool *valid) {
     *valid = persisted_target_valid;
     if (*valid) {
         *addr = target_addr;
+    }
+    return 0;
+}
+
+static int load_persisted_target_meta(uint8_t *sec_level_hint, char *name, bool *has_name,
+                                      bool *valid) {
+    int err;
+
+    if (!sec_level_hint || !name || !has_name || !valid) {
+        return -EINVAL;
+    }
+
+    persisted_target_meta_valid = false;
+    err = settings_load_subtree("ble_hogp_sniffer");
+    if (err) {
+        *valid = false;
+        return err;
+    }
+
+    *valid = persisted_target_meta_valid;
+    if (*valid) {
+        *sec_level_hint = target_sec_level_hint;
+        *has_name = target_name_valid;
+        if (target_name_valid) {
+            strncpy(name, target_name, TARGET_NAME_MAX - 1U);
+            name[TARGET_NAME_MAX - 1U] = '\0';
+        } else {
+            name[0] = '\0';
+        }
     }
     return 0;
 }
@@ -1272,7 +1367,7 @@ static int discover_hids(struct bt_conn *conn) {
 
 static void connected_cb(struct bt_conn *conn, uint8_t err) {
     int derr;
-    bt_security_t wanted_sec = (bt_security_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_SECURITY_LEVEL;
+    bt_security_t wanted_sec = get_desired_security_level();
     const bt_addr_le_t *peer = bt_conn_get_dst(conn);
     struct bt_conn_info info = {0};
     bool is_peripheral = (bt_conn_get_info(conn, &info) == 0 && info.role == BT_CONN_ROLE_PERIPHERAL);
@@ -1312,6 +1407,12 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     }
 
     LOG_INF("Connected to target");
+    if (force_l1_next_connect && wanted_sec == BT_SECURITY_L1) {
+        LOG_WRN("Using temporary security fallback L1 after auth failure");
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+        type_text_line("sec fallback l1");
+#endif
+    }
     target_ready_announced = false;
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     screen_log_target_addr("target connected", peer);
@@ -1345,6 +1446,9 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
         } else {
             LOG_INF("Persisted target addr");
         }
+        (void)save_persisted_target_meta(target_sec_hint_valid ? target_sec_level_hint
+                                                               : (uint8_t)wanted_sec,
+                                         target_name, target_name_valid);
     }
     gatt_discovery_started = false;
     apply_host_adv_policy(true);
@@ -1458,7 +1562,7 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
 
 static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum bt_security_err err) {
     int derr;
-    bt_security_t wanted_sec = (bt_security_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_SECURITY_LEVEL;
+    bt_security_t wanted_sec = get_desired_security_level();
 
     if (conn != default_conn) {
         return;
@@ -1471,6 +1575,17 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
         screen_log_verbose_code("sec err", (uint32_t)err);
         type_text_line("target sec fail");
 #endif
+        if ((int)err == 4) {
+            /* Typical auth requirement mismatch. Slow down retries and try L1 once. */
+            if (auth_fail_streak < UINT8_MAX) {
+                auth_fail_streak++;
+            }
+            force_l1_next_connect = true;
+            next_connect_allowed_ms =
+                k_uptime_get() + (int64_t)MIN((uint32_t)auth_fail_streak * 3000U, 12000U);
+            LOG_WRN("Auth requirement mismatch, cooldown=%lldms, fallback L1 next",
+                    (long long)(next_connect_allowed_ms - k_uptime_get()));
+        }
         if (!gatt_discovery_started) {
             LOG_WRN("Security failed; trying HID discovery fallback");
             gatt_discovery_started = true;
@@ -1490,6 +1605,11 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
         return;
     }
 
+    force_l1_next_connect = false;
+    auth_fail_streak = 0U;
+    target_sec_level_hint = (uint8_t)level;
+    target_sec_hint_valid = true;
+    (void)save_persisted_target_meta(target_sec_level_hint, target_name, target_name_valid);
     gatt_discovery_started = true;
     derr = discover_hids(conn);
     if (derr) {
@@ -1513,6 +1633,14 @@ static void pairing_complete_cb(struct bt_conn *conn, bool bonded) {
 static void pairing_failed_cb(struct bt_conn *conn, enum bt_security_err reason) {
     ARG_UNUSED(conn);
     LOG_WRN("Pairing failed (reason=%d: %s)", (int)reason, sec_err_to_str(reason));
+    if ((int)reason == 4) {
+        if (auth_fail_streak < UINT8_MAX) {
+            auth_fail_streak++;
+        }
+        force_l1_next_connect = true;
+        next_connect_allowed_ms =
+            k_uptime_get() + (int64_t)MIN((uint32_t)auth_fail_streak * 3000U, 12000U);
+    }
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     screen_log_target_reason("pair fail", (uint8_t)reason, sec_err_to_str(reason));
 #endif
@@ -1627,16 +1755,25 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
     }
 
     if (!target_any_addr) {
+        bool addr_match = false;
+
         if (target_match_any_type) {
-            if (!bt_addr_eq(&addr->a, &target_addr.a)) {
-                return;
-            }
+            addr_match = bt_addr_eq(&addr->a, &target_addr.a);
         } else {
-            if (addr->type != target_addr.type) {
-                return;
+            if (addr->type == target_addr.type && bt_addr_eq(&addr->a, &target_addr.a)) {
+                addr_match = true;
+            }
+        }
+
+        if (!addr_match) {
+            bool name_match = false;
+
+            if (target_name_valid && extract_alnum_name(ad, name, sizeof(name)) && name[0] != '\0' &&
+                strcmp(name, target_name) == 0) {
+                name_match = true;
             }
 
-            if (!bt_addr_eq(&addr->a, &target_addr.a)) {
+            if (!name_match) {
                 return;
             }
         }
@@ -1809,6 +1946,8 @@ static void picker_probe_timeout_work_handler(struct k_work *work) {
 
 static void candidate_connect_work_handler(struct k_work *work) {
     int err;
+    int64_t now;
+    uint32_t wait_ms;
     uint8_t same_rank = 0U;
     uint8_t same_total = 0U;
     ARG_UNUSED(work);
@@ -1828,6 +1967,13 @@ static void candidate_connect_work_handler(struct k_work *work) {
     screen_log_verbose_code("try idx", (uint32_t)(candidate_index + 1U));
 #endif
     err = connect_to_candidate(&candidate_addrs[candidate_index]);
+    if (err == -EAGAIN) {
+        now = k_uptime_get();
+        wait_ms = (next_connect_allowed_ms > now) ? (uint32_t)(next_connect_allowed_ms - now) : 200U;
+        LOG_INF("Retry same candidate after throttle in %u ms", wait_ms);
+        schedule_connect_current_candidate(wait_ms);
+        return;
+    }
     if (err) {
         if (reconnect_fail_count < UINT8_MAX) {
             reconnect_fail_count++;
@@ -2022,6 +2168,7 @@ static void picker_button_work_handler(struct k_work *work) {
                 LOG_INF("Running full connection reset");
                 bt_foreach_bond(BT_ID_DEFAULT, clear_all_bonds_cb, NULL);
                 (void)settings_delete("ble_hogp_sniffer/target_addr");
+                (void)settings_delete("ble_hogp_sniffer/target_meta");
 
                 picker_name_probe_active = false;
                 picker_probe_count = 0;
@@ -2032,6 +2179,11 @@ static void picker_button_work_handler(struct k_work *work) {
                 selected_target_valid = false;
                 target_any_addr = false;
                 target_hid_verified = false;
+                target_name[0] = '\0';
+                target_name_valid = false;
+                target_sec_hint_valid = false;
+                force_l1_next_connect = false;
+                auth_fail_streak = 0U;
                 reconnect_fail_count = 0;
                 in_candidate_sequence = false;
                 candidate_count = 0;
@@ -2066,6 +2218,10 @@ static void picker_button_work_handler(struct k_work *work) {
             }
 
             bt_addr_le_copy(&target_addr, &picker_devices[picker_selected_index - 2U].addr);
+            strncpy(target_name, picker_devices[picker_selected_index - 2U].name,
+                    sizeof(target_name) - 1U);
+            target_name[sizeof(target_name) - 1U] = '\0';
+            target_name_valid = (target_name[0] != '\0');
             selected_target_valid = true;
             target_any_addr = false;
             target_match_any_type = true;
@@ -2089,6 +2245,11 @@ static void picker_button_work_handler(struct k_work *work) {
             k_work_cancel_delayable(&picker_probe_timeout_work);
             selected_target_valid = false;
             target_hid_verified = false;
+            target_name[0] = '\0';
+            target_name_valid = false;
+            target_sec_hint_valid = false;
+            force_l1_next_connect = false;
+            auth_fail_streak = 0U;
             in_candidate_sequence = false;
             candidate_count = 0;
             candidate_index = 0;
@@ -2137,6 +2298,9 @@ static int parse_target_addr(void) {
     bt_addr_t addr;
 
     target_match_any_type = false;
+    target_name[0] = '\0';
+    target_name_valid = false;
+    target_sec_hint_valid = false;
 
     if (CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET_MAC[0] == '\0') {
         target_any_addr = true;
@@ -2197,20 +2361,30 @@ static int ble_hogp_sniffer_init(void) {
     target_any_addr = false;
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_BUTTON_SELECTOR)) {
         bool loaded = false;
+        bool mloaded = false;
         int lerr = load_persisted_target_addr(&target_addr, &loaded);
+        int merr = load_persisted_target_meta(&target_sec_level_hint, target_name, &target_name_valid,
+                                              &mloaded);
         if (lerr) {
             LOG_WRN("Persisted target load failed (%d)", lerr);
         }
+        if (merr) {
+            LOG_WRN("Persisted target meta load failed (%d)", merr);
+        }
         selected_target_valid = loaded;
+        target_sec_hint_valid = mloaded;
         picker_device_count = 0;
         picker_unknown_count = 0;
         picker_selected_index = 0;
         if (loaded) {
             target_any_addr = false;
             target_match_any_type = true;
-            LOG_INF("Button selector mode: restored last target");
+            LOG_INF("Button selector mode: restored last target%s", target_name_valid ? " by name" : "");
         } else {
             memset(&target_addr, 0, sizeof(target_addr));
+            target_name[0] = '\0';
+            target_name_valid = false;
+            target_sec_hint_valid = false;
             LOG_INF("Button selector mode enabled (Up/Down/OK/Back)");
         }
     } else {
@@ -2225,6 +2399,8 @@ static int ble_hogp_sniffer_init(void) {
     memset(prev_consumer_slots, 0, sizeof(prev_consumer_slots));
     target_hid_verified = false;
     next_connect_allowed_ms = 0;
+    force_l1_next_connect = false;
+    auth_fail_streak = 0U;
     picker_name_probe_active = false;
     picker_probe_count = 0;
     picker_probe_pos = 0;
