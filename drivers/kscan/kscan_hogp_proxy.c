@@ -8,7 +8,11 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
 
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_LEVEL)
 LOG_MODULE_REGISTER(kscan_hogp_proxy, CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_LEVEL);
+#else
+LOG_MODULE_REGISTER(kscan_hogp_proxy, LOG_LEVEL_INF);
+#endif
 
 struct hogp_proxy_kscan_event {
     uint16_t row;
