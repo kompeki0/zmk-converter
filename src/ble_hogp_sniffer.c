@@ -170,6 +170,7 @@ static void step_security_policy_on_failure(int reason_code, const char *tag);
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 static void emit_usage_state(uint8_t usage, bool pressed);
+static void screen_log_target_reason(const char *prefix, uint8_t code, const char *reason);
 #endif
 
 int zmk_hogp_proxy_kscan_inject(uint16_t row, uint16_t col, bool pressed);
