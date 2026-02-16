@@ -30,6 +30,7 @@ static struct bt_gatt_discover_params discover_params;
 static struct bt_gatt_subscribe_params subscribe_params;
 static bt_addr_le_t target_addr;
 static struct k_work_delayable sniffer_start_work;
+static struct k_work_delayable reconnect_work;
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT) &&                                \
     defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 static struct k_work_delayable selftest_work;
@@ -43,6 +44,8 @@ static uint16_t hids_start_handle;
 static uint16_t hids_end_handle;
 static bool scanning;
 static bool connecting;
+static bool gatt_discovery_started;
+static uint8_t reconnect_fail_count;
 
 static struct bt_uuid_16 hids_uuid = BT_UUID_INIT_16(BT_UUID_HIDS_VAL);
 static struct bt_uuid_16 report_uuid = BT_UUID_INIT_16(BT_UUID_HIDS_REPORT_VAL);
@@ -53,6 +56,7 @@ static size_t prev_usage_count;
 
 static int start_scan(void);
 static int clear_non_target_bonds(void);
+static void schedule_scan_restart(void);
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 static void emit_usage_state(uint8_t usage, bool pressed);
@@ -352,6 +356,7 @@ static uint8_t discover_ccc_cb(struct bt_conn *conn, const struct bt_gatt_attr *
     if (err) {
         LOG_ERR("bt_gatt_subscribe failed (%d)", err);
     } else {
+        reconnect_fail_count = 0;
         LOG_INF("Subscribed to Input Report notifications");
     }
 
@@ -444,19 +449,31 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
         LOG_ERR("Connection failed (err 0x%02x)", err);
         bt_conn_unref(default_conn);
         default_conn = NULL;
-        (void)start_scan();
+        if (reconnect_fail_count < UINT8_MAX) {
+            reconnect_fail_count++;
+        }
+        schedule_scan_restart();
         return;
     }
 
     LOG_INF("Connected to target");
+    gatt_discovery_started = false;
     derr = bt_conn_set_security(conn, BT_SECURITY_L2);
-    if (derr && derr != -EALREADY) {
-        LOG_WRN("bt_conn_set_security failed (%d)", derr);
+    if (derr == -EALREADY) {
+        gatt_discovery_started = true;
+        derr = discover_hids(conn);
+        if (derr) {
+            LOG_ERR("HID discovery start failed (%d)", derr);
+        }
+        return;
     }
 
-    derr = discover_hids(conn);
     if (derr) {
-        LOG_ERR("HID discovery start failed (%d)", derr);
+        LOG_WRN("bt_conn_set_security failed (%d)", derr);
+        if (reconnect_fail_count < UINT8_MAX) {
+            reconnect_fail_count++;
+        }
+        schedule_scan_restart();
     }
 }
 
@@ -481,12 +498,39 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
 #endif
     prev_usage_count = 0;
 
-    (void)start_scan();
+    if (reconnect_fail_count < UINT8_MAX) {
+        reconnect_fail_count++;
+    }
+    schedule_scan_restart();
+}
+
+static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum bt_security_err err) {
+    int derr;
+
+    if (conn != default_conn) {
+        return;
+    }
+
+    if (err) {
+        LOG_WRN("Security changed failed (level %u, err %d)", level, err);
+        return;
+    }
+
+    if (level < BT_SECURITY_L2 || gatt_discovery_started) {
+        return;
+    }
+
+    gatt_discovery_started = true;
+    derr = discover_hids(conn);
+    if (derr) {
+        LOG_ERR("HID discovery start failed (%d)", derr);
+    }
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
     .connected = connected_cb,
     .disconnected = disconnected_cb,
+    .security_changed = security_changed_cb,
 };
 
 static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
@@ -557,6 +601,30 @@ static int start_scan(void) {
     return 0;
 }
 
+static void reconnect_work_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+    (void)start_scan();
+}
+
+static void schedule_scan_restart(void) {
+    uint32_t delay_ms;
+
+    if (reconnect_fail_count == 0) {
+        delay_ms = 200U;
+    } else if (reconnect_fail_count == 1) {
+        delay_ms = 500U;
+    } else if (reconnect_fail_count == 2) {
+        delay_ms = 1000U;
+    } else if (reconnect_fail_count == 3) {
+        delay_ms = 2000U;
+    } else {
+        delay_ms = 4000U;
+    }
+
+    LOG_INF("Restart scan in %u ms (fail=%u)", delay_ms, reconnect_fail_count);
+    k_work_schedule(&reconnect_work, K_MSEC(delay_ms));
+}
+
 static int parse_target_addr(void) {
     int err;
     const bool target_is_public = IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET_ADDR_TYPE_PUBLIC);
@@ -622,6 +690,7 @@ static void sniffer_start_work_handler(struct k_work *work) {
 
 static int ble_hogp_sniffer_schedule_init(void) {
     printk("[hogp] schedule init\r\n");
+    k_work_init_delayable(&reconnect_work, reconnect_work_handler);
     k_work_init_delayable(&sniffer_start_work, sniffer_start_work_handler);
     k_work_schedule(&sniffer_start_work, K_SECONDS(3));
     return 0;
