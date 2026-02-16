@@ -43,6 +43,7 @@ static struct bt_gatt_subscribe_params subscribe_params[MAX_REPORT_SUBSCRIPTIONS
 static bt_addr_le_t target_addr;
 static bool selected_target_valid;
 static bool target_any_addr;
+static bool target_match_any_type;
 static bt_addr_le_t candidate_addrs[MAX_SCAN_CANDIDATES];
 struct picker_device {
     bt_addr_le_t addr;
@@ -571,12 +572,20 @@ static void screen_log_verbose_text(const char *text) {
 #endif
 
 static void picker_add_or_update(const bt_addr_le_t *addr, const char *name, int8_t rssi) {
+    char fallback[PICKER_NAME_MAX];
+    const char *use_name = name;
     int idx = picker_find_index_by_addr(addr);
+
+    if (!name || name[0] == '\0') {
+        snprintf(fallback, sizeof(fallback), "UNK%02X%02X%02X", addr->a.val[2], addr->a.val[1],
+                 addr->a.val[0]);
+        use_name = fallback;
+    }
 
     if (idx >= 0) {
         picker_devices[idx].rssi = rssi;
-        if (picker_devices[idx].name[0] == '\0' && name[0] != '\0') {
-            strncpy(picker_devices[idx].name, name, sizeof(picker_devices[idx].name) - 1);
+        if (picker_devices[idx].name[0] == '\0' && use_name[0] != '\0') {
+            strncpy(picker_devices[idx].name, use_name, sizeof(picker_devices[idx].name) - 1);
             picker_devices[idx].name[sizeof(picker_devices[idx].name) - 1] = '\0';
         }
         return;
@@ -588,7 +597,7 @@ static void picker_add_or_update(const bt_addr_le_t *addr, const char *name, int
 
     bt_addr_le_copy(&picker_devices[picker_device_count].addr, addr);
     picker_devices[picker_device_count].rssi = rssi;
-    strncpy(picker_devices[picker_device_count].name, name,
+    strncpy(picker_devices[picker_device_count].name, use_name,
             sizeof(picker_devices[picker_device_count].name) - 1);
     picker_devices[picker_device_count].name[sizeof(picker_devices[picker_device_count].name) - 1] =
         '\0';
@@ -1264,20 +1273,24 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
     }
 
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_BUTTON_SELECTOR) && !selected_target_valid) {
-        if (!extract_alnum_name(ad, name, sizeof(name))) {
-            return;
-        }
+        (void)extract_alnum_name(ad, name, sizeof(name));
         picker_add_or_update(addr, name, rssi);
         return;
     }
 
     if (!target_any_addr) {
-        if (addr->type != target_addr.type) {
-            return;
-        }
+        if (target_match_any_type) {
+            if (!bt_addr_eq(&addr->a, &target_addr.a)) {
+                return;
+            }
+        } else {
+            if (addr->type != target_addr.type) {
+                return;
+            }
 
-        if (!bt_addr_eq(&addr->a, &target_addr.a)) {
-            return;
+            if (!bt_addr_eq(&addr->a, &target_addr.a)) {
+                return;
+            }
         }
     }
 
@@ -1608,6 +1621,8 @@ static void picker_button_work_handler(struct k_work *work) {
 
             bt_addr_le_copy(&target_addr, &picker_devices[picker_selected_index - 1U].addr);
             selected_target_valid = true;
+            target_any_addr = false;
+            target_match_any_type = true;
             target_hid_verified = false;
             reconnect_fail_count = 0;
             in_candidate_sequence = false;
@@ -1617,21 +1632,7 @@ static void picker_button_work_handler(struct k_work *work) {
 
             picker_announce_current("connect");
             apply_host_adv_policy(should_wait_for_host() ? true : false);
-
-            if (scanning) {
-                int serr = bt_le_scan_stop();
-                if (serr && serr != -EALREADY) {
-                    LOG_WRN("Scan stop before connect failed (%d)", serr);
-                }
-                scanning = false;
-            }
-
-            {
-                int cerr = connect_to_candidate(&target_addr);
-                if (cerr) {
-                    schedule_scan_restart();
-                }
-            }
+            (void)start_scan();
             break;
 
         case 3: /* Back */
@@ -1683,6 +1684,8 @@ static int parse_target_addr(void) {
     int err;
     const bool target_is_public = IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET_ADDR_TYPE_PUBLIC);
     bt_addr_t addr;
+
+    target_match_any_type = false;
 
     if (CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET_MAC[0] == '\0') {
         target_any_addr = true;
@@ -1745,6 +1748,7 @@ static int ble_hogp_sniffer_init(void) {
         picker_selected_index = 0;
         if (loaded) {
             target_any_addr = false;
+            target_match_any_type = true;
             LOG_INF("Button selector mode: restored last target");
         } else {
             memset(&target_addr, 0, sizeof(target_addr));
