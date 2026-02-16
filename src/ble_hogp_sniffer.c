@@ -538,6 +538,22 @@ static void screen_log_target_code(const char *prefix, uint8_t code) {
     snprintf(line, sizeof(line), "%s %u", prefix, (uint32_t)code);
     type_text_line(line);
 }
+
+static void screen_log_verbose_code(const char *prefix, uint32_t code) {
+    char line[64];
+    if (!IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_SCREEN_LOG_VERBOSE)) {
+        return;
+    }
+    snprintf(line, sizeof(line), "%s %u", prefix, code);
+    type_text_line(line);
+}
+
+static void screen_log_verbose_text(const char *text) {
+    if (!IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_SCREEN_LOG_VERBOSE)) {
+        return;
+    }
+    type_text_line(text);
+}
 #endif
 
 static void picker_add_or_update(const bt_addr_le_t *addr, const char *name, int8_t rssi) {
@@ -826,12 +842,18 @@ static uint8_t discover_ccc_cb(struct bt_conn *conn, const struct bt_gatt_attr *
         err = bt_gatt_subscribe(conn, sub);
         if (err) {
             LOG_ERR("bt_gatt_subscribe failed for vh=0x%04x (%d)", pending_report_value_handle, err);
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+            screen_log_verbose_code("sub err", (uint32_t)(-err));
+#endif
         } else {
             reconnect_fail_count = 0;
             target_hid_verified = true;
             report_sub_count++;
             LOG_INF("Subscribed Input Report #%u (vh=0x%04x ccc=0x%04x)", report_sub_count,
                     pending_report_value_handle, attr->handle);
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+            screen_log_verbose_code("sub ok", report_sub_count);
+#endif
         }
     }
 
@@ -852,8 +874,14 @@ static uint8_t discover_report_cb(struct bt_conn *conn, const struct bt_gatt_att
     if (!attr) {
         if (report_sub_count == 0) {
             LOG_ERR("No notifiable Input Report characteristic subscribed");
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+            screen_log_verbose_text("no report sub");
+#endif
         } else {
             LOG_INF("Report discovery complete (subscriptions=%u)", report_sub_count);
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+            screen_log_verbose_code("sub total", report_sub_count);
+#endif
         }
         return BT_GATT_ITER_STOP;
     }
@@ -906,8 +934,14 @@ static uint8_t discover_hids_cb(struct bt_conn *conn, const struct bt_gatt_attr 
     err = resume_report_discovery(conn, (uint16_t)(hids_start_handle + 1U));
     if (err) {
         LOG_ERR("Report characteristic discovery failed (%d)", err);
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+        screen_log_verbose_code("report disc err", (uint32_t)(-err));
+#endif
     } else {
         LOG_INF("HID service found, discovering Input Report characteristics");
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+        screen_log_verbose_text("hids found");
+#endif
     }
 
     return BT_GATT_ITER_STOP;
@@ -959,6 +993,7 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     LOG_INF("Connected to target");
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     screen_log_target_addr("target connected", peer);
+    screen_log_verbose_text("conn ok");
 #endif
     if (peer) {
         target_addr = *peer;
@@ -993,6 +1028,9 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
 
     if (derr == 0) {
         /* Wait for security_changed callback, then start discovery. */
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+        screen_log_verbose_text("wait sec");
+#endif
         return;
     }
 
@@ -1016,10 +1054,13 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
     bool is_peripheral = (bt_conn_get_info(conn, &info) == 0 && info.role == BT_CONN_ROLE_PERIPHERAL);
 
     if (conn != default_conn) {
-        if (is_peripheral) {
-            host_connected = false;
-            LOG_INF("Host PC disconnected (reason 0x%02x)", reason);
-        }
+    if (is_peripheral) {
+        host_connected = false;
+        LOG_INF("Host PC disconnected (reason 0x%02x)", reason);
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+        screen_log_verbose_code("host disc", reason);
+#endif
+    }
         return;
     }
 
@@ -1027,6 +1068,7 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     screen_log_target_addr("target disconnected", peer);
     screen_log_target_code("target disc reason", reason);
+    screen_log_verbose_text("reconnect");
 #endif
 
     bt_conn_unref(default_conn);
@@ -1069,6 +1111,9 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
 
     if (err) {
         LOG_WRN("Security changed failed (level %u, err %d)", level, err);
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+        screen_log_verbose_code("sec err", (uint32_t)err);
+#endif
         return;
     }
 
@@ -1080,6 +1125,13 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
     derr = discover_hids(conn);
     if (derr) {
         LOG_ERR("HID discovery start failed (%d)", derr);
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+        screen_log_verbose_code("disc err", (uint32_t)derr);
+#endif
+    } else {
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+        screen_log_verbose_text("disc hids");
+#endif
     }
 }
 
@@ -1202,6 +1254,9 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
         candidate_count++;
         LOG_INF("Target candidate #%u found in scan cycle (rssi=%d type=%u)", candidate_count, rssi,
                 adv_type);
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+        screen_log_verbose_code("cand", candidate_count);
+#endif
     } else {
         LOG_DBG("Candidate list full, dropping additional match");
     }
@@ -1231,6 +1286,9 @@ static int start_scan(void) {
 
     if (!host_ready_for_target_scan()) {
         LOG_INF("Waiting host PC connection before target scan");
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+        screen_log_verbose_text("wait host pc");
+#endif
         return 0;
     }
 
@@ -1248,6 +1306,9 @@ static int start_scan(void) {
     scanning = true;
     k_work_schedule(&scan_cycle_work, K_MSEC(CONFIG_ZMK_BLE_HOGP_SNIFFER_SCAN_CYCLE_MS));
     LOG_INF("Scanning started (cycle=%d ms)", CONFIG_ZMK_BLE_HOGP_SNIFFER_SCAN_CYCLE_MS);
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+    screen_log_verbose_text("scan start");
+#endif
     return 0;
 }
 
@@ -1255,6 +1316,9 @@ static int connect_to_candidate(const bt_addr_le_t *addr) {
     int err;
 
     connecting = true;
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+    screen_log_verbose_text("connect try");
+#endif
     err = bt_conn_le_create(addr, BT_CONN_LE_CREATE_CONN, BT_LE_CONN_PARAM_DEFAULT, &default_conn);
     if (err) {
         connecting = false;
@@ -1275,6 +1339,9 @@ static void candidate_connect_work_handler(struct k_work *work) {
     }
 
     LOG_INF("Trying candidate %u/%u", (uint8_t)(candidate_index + 1U), candidate_count);
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+    screen_log_verbose_code("try idx", (uint32_t)(candidate_index + 1U));
+#endif
     err = connect_to_candidate(&candidate_addrs[candidate_index]);
     if (err) {
         if (reconnect_fail_count < UINT8_MAX) {
