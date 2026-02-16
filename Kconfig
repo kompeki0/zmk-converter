@@ -78,4 +78,14 @@ config ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT
       After boot, when an output endpoint is connected, emit key events to type
       the string 'testing'. This is for quickly confirming host connectivity.
 
+config ZMK_BLE_HOGP_SNIFFER_BLOCK_HOST_ADV_UNTIL_TARGET_CONNECTED
+    bool "Block host BLE advertising until target keyboard is connected"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    depends on ZMK_BLE
+    default y
+    help
+      Stop ZMK's peripheral advertising while waiting for the fixed target
+      keyboard connection. Once connected, advertising is resumed so a PC can
+      pair/connect.
+
 endmenu

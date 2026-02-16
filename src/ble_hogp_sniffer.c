@@ -13,6 +13,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
 
+#include <zmk/ble.h>
 #include <zmk/event_manager.h>
 #include <zmk/usb.h>
 
@@ -46,6 +47,7 @@ static bool scanning;
 static bool connecting;
 static bool gatt_discovery_started;
 static uint8_t reconnect_fail_count;
+static bool host_adv_blocked;
 
 static struct bt_uuid_16 hids_uuid = BT_UUID_INIT_16(BT_UUID_HIDS_VAL);
 static struct bt_uuid_16 report_uuid = BT_UUID_INIT_16(BT_UUID_HIDS_REPORT_VAL);
@@ -57,6 +59,7 @@ static size_t prev_usage_count;
 static int start_scan(void);
 static int clear_non_target_bonds(void);
 static void schedule_scan_restart(void);
+static void apply_host_adv_policy(bool target_connected);
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 static void emit_usage_state(uint8_t usage, bool pressed);
@@ -458,6 +461,7 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
 
     LOG_INF("Connected to target");
     gatt_discovery_started = false;
+    apply_host_adv_policy(true);
     derr = bt_conn_set_security(conn, BT_SECURITY_L2);
     if (derr == -EALREADY) {
         gatt_discovery_started = true;
@@ -507,6 +511,7 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
     }
 #endif
     prev_usage_count = 0;
+    apply_host_adv_policy(false);
 
     if (reconnect_fail_count < UINT8_MAX) {
         reconnect_fail_count++;
@@ -635,6 +640,40 @@ static void schedule_scan_restart(void) {
     k_work_schedule(&reconnect_work, K_MSEC(delay_ms));
 }
 
+static void apply_host_adv_policy(bool target_connected) {
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_BLOCK_HOST_ADV_UNTIL_TARGET_CONNECTED)
+    if (!IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_BLOCK_HOST_ADV_UNTIL_TARGET_CONNECTED)) {
+        return;
+    }
+
+    if (!target_connected) {
+        if (!host_adv_blocked) {
+            int err = bt_le_adv_stop();
+            if (err && err != -EALREADY) {
+                LOG_WRN("Failed to stop host advertising (%d)", err);
+            } else {
+                host_adv_blocked = true;
+                LOG_INF("Host BLE advertising blocked until target connects");
+            }
+        }
+        return;
+    }
+
+    if (host_adv_blocked) {
+        /* Nudge ZMK to re-run its default advertising state machine. */
+        int err = zmk_ble_set_device_name((char *)CONFIG_BT_DEVICE_NAME);
+        if (err) {
+            LOG_WRN("Failed to resume host advertising (%d)", err);
+        } else {
+            host_adv_blocked = false;
+            LOG_INF("Host BLE advertising resumed");
+        }
+    }
+#else
+    ARG_UNUSED(target_connected);
+#endif
+}
+
 static int parse_target_addr(void) {
     int err;
     const bool target_is_public = IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET_ADDR_TYPE_PUBLIC);
@@ -682,6 +721,7 @@ static int ble_hogp_sniffer_init(void) {
     }
 
     (void)clear_non_target_bonds();
+    apply_host_adv_policy(false);
 
     err = start_scan();
     if (err) {
