@@ -23,7 +23,6 @@
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 #include <zmk/events/keycode_state_changed.h>
-#include <dt-bindings/zmk/keys.h>
 #endif
 
 LOG_MODULE_REGISTER(ble_hogp_sniffer, CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_LEVEL);
@@ -419,16 +418,20 @@ static const char *sec_err_to_str(enum bt_security_err err) {
     }
 }
 
+static bt_security_t sec_policy_level_for_idx(uint8_t idx) {
+    switch (idx) {
+    case 0U:
+        return BT_SECURITY_L3;
+    case 1U:
+        return BT_SECURITY_L2;
+    default:
+        return BT_SECURITY_L1;
+    }
+}
+
 static bt_security_t get_desired_security_level(void) {
     if (sec_policy_cycle_active) {
-        switch (sec_policy_try_idx) {
-        case 0:
-            return BT_SECURITY_L3;
-        case 1:
-            return BT_SECURITY_L2;
-        default:
-            return BT_SECURITY_L1;
-        }
+        return sec_policy_level_for_idx(sec_policy_try_idx);
     }
 
     if (target_sec_hint_valid) {
@@ -440,6 +443,8 @@ static bt_security_t get_desired_security_level(void) {
 
 static void step_security_policy_on_failure(int reason_code, const char *tag) {
     int64_t now = k_uptime_get();
+    bt_security_t prev_level = get_desired_security_level();
+    bt_security_t next_level;
 
     /* Pairing callbacks and security_changed can report the same failure. */
     if ((now - last_sec_policy_step_ms) < 500) {
@@ -449,18 +454,24 @@ static void step_security_policy_on_failure(int reason_code, const char *tag) {
 
     if (!sec_policy_cycle_active) {
         sec_policy_cycle_active = true;
-        sec_policy_try_idx = 0;
+        if (prev_level >= BT_SECURITY_L3) {
+            sec_policy_try_idx = 1U; /* L3 failed -> try L2 */
+        } else if (prev_level == BT_SECURITY_L2) {
+            sec_policy_try_idx = 2U; /* L2 failed -> try L1 */
+        } else {
+            sec_policy_try_idx = 2U; /* already low -> keep L1 */
+        }
     } else if (sec_policy_try_idx < 2U) {
         sec_policy_try_idx++;
     }
 
-    next_connect_allowed_ms = now + (int64_t)(3000U * (uint32_t)(sec_policy_try_idx + 1U));
-    LOG_WRN("%s: security policy next L%u (step %u/3), cooldown=%lldms", tag,
-            (uint32_t)get_desired_security_level(), (uint32_t)(sec_policy_try_idx + 1U),
+    next_level = get_desired_security_level();
+    next_connect_allowed_ms = now + (int64_t)(2500U * (uint32_t)(sec_policy_try_idx + 1U));
+    LOG_WRN("%s: security policy L%u -> L%u (step %u/3), cooldown=%lldms", tag,
+            (uint32_t)prev_level, (uint32_t)next_level, (uint32_t)(sec_policy_try_idx + 1U),
             (long long)(next_connect_allowed_ms - now));
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-    screen_log_target_reason("sec policy", (uint8_t)get_desired_security_level(),
-                             "next security level");
+    screen_log_target_reason("sec policy", (uint8_t)next_level, "next security level");
 #endif
     ARG_UNUSED(reason_code);
 }
@@ -606,29 +617,29 @@ static bool char_to_usage(char c, uint8_t *usage, bool *need_shift) {
         return true;
     }
     if (c == ' ') {
-        *usage = SPACE;
+        *usage = 0x2C;
         return true;
     }
     if (c == '\n') {
-        *usage = ENTER;
+        *usage = 0x28;
         return true;
     }
     if (c == '-') {
-        *usage = MINUS;
+        *usage = 0x2D;
         return true;
     }
     if (c == ':') {
-        *usage = SEMI;
+        *usage = 0x33;
         *need_shift = true;
         return true;
     }
     if (c == '*') {
-        *usage = N8;
+        *usage = 0x25;
         *need_shift = true;
         return true;
     }
     if (c == ';') {
-        *usage = SEMI;
+        *usage = 0x33;
         return true;
     }
     return false;
@@ -648,7 +659,7 @@ static void type_text_line(const char *text) {
         }
 
         if (need_shift) {
-            emit_usage_state(LSHIFT, true);
+            emit_usage_state(0xE1, true);
             k_msleep(1);
         }
 
@@ -658,13 +669,13 @@ static void type_text_line(const char *text) {
 
         if (need_shift) {
             k_msleep(1);
-            emit_usage_state(LSHIFT, false);
+            emit_usage_state(0xE1, false);
         }
         k_msleep(2);
     }
-    emit_usage_state(ENTER, true);
+    emit_usage_state(0x28, true);
     k_msleep(1);
-    emit_usage_state(ENTER, false);
+    emit_usage_state(0x28, false);
 }
 #endif
 
