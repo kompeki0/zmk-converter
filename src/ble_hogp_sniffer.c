@@ -64,6 +64,7 @@ static struct k_work_delayable reconnect_work;
 static struct k_work_delayable scan_cycle_work;
 static struct k_work_delayable candidate_connect_work;
 static struct k_work_delayable picker_probe_timeout_work;
+static struct k_work_delayable security_disconnect_work;
 static struct k_work picker_button_work;
 K_MSGQ_DEFINE(picker_button_msgq, sizeof(uint8_t), 16, 4);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT) &&                                \
@@ -105,6 +106,7 @@ static uint8_t picker_probe_count;
 static uint8_t picker_probe_pos;
 static bt_addr_le_t picker_probe_addr;
 static bool picker_probe_addr_valid;
+static uint8_t pending_disconnect_reason;
 
 static struct bt_uuid_16 hids_uuid = BT_UUID_INIT_16(BT_UUID_HIDS_VAL);
 static struct bt_uuid_16 report_uuid = BT_UUID_INIT_16(BT_UUID_HIDS_REPORT_VAL);
@@ -161,6 +163,7 @@ static int resume_report_discovery(struct bt_conn *conn, uint16_t next_start_han
 static uint8_t discover_report_cb(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                                   struct bt_gatt_discover_params *params);
 static void picker_button_work_handler(struct k_work *work);
+static void security_disconnect_work_handler(struct k_work *work);
 static int save_persisted_target_addr(const bt_addr_le_t *addr);
 static int load_persisted_target_addr(bt_addr_le_t *addr, bool *valid);
 static int save_persisted_target_meta(uint8_t sec_level_hint, const char *name, bool has_name);
@@ -168,6 +171,8 @@ static int load_persisted_target_meta(uint8_t *sec_level_hint, char *name, bool 
                                       bool *valid);
 static void clear_all_bonds_cb(const struct bt_bond_info *info, void *user_data);
 static void step_security_policy_on_failure(int reason_code, const char *tag);
+static void schedule_security_disconnect(uint8_t reason, uint32_t delay_ms);
+static void clear_default_conn_ref(void);
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 static void emit_usage_state(uint8_t usage, bool pressed);
@@ -175,6 +180,26 @@ static void screen_emit_usage_state(uint8_t usage, bool pressed);
 #endif
 
 int zmk_hogp_proxy_kscan_inject(uint16_t row, uint16_t col, bool pressed);
+
+static void clear_default_conn_ref(void) {
+    if (default_conn) {
+        bt_conn_unref(default_conn);
+        default_conn = NULL;
+    }
+}
+
+static void security_disconnect_work_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+
+    if (default_conn) {
+        (void)bt_conn_disconnect(default_conn, pending_disconnect_reason);
+    }
+}
+
+static void schedule_security_disconnect(uint8_t reason, uint32_t delay_ms) {
+    pending_disconnect_reason = reason;
+    k_work_schedule(&security_disconnect_work, K_MSEC(delay_ms));
+}
 
 static bool usage_to_row_col(uint8_t usage, uint16_t *row, uint16_t *col) {
     /* "100%" (ANSI 104) superset mapping for Keyboard/Keypad page (0x07).
@@ -1201,8 +1226,7 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
             screen_emit_usage_state, "target connect err", err,
             zmk_hogp_sniffer_hci_reason_to_str(err));
 #endif
-        bt_conn_unref(default_conn);
-        default_conn = NULL;
+        clear_default_conn_ref();
         if (reconnect_fail_count < UINT8_MAX) {
             reconnect_fail_count++;
         }
@@ -1300,7 +1324,7 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
 
     LOG_WRN("bt_conn_set_security failed (%d), reconnect with next security policy", derr);
     step_security_policy_on_failure(derr, "set_security_failed");
-    (void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+    schedule_security_disconnect(BT_HCI_ERR_REMOTE_USER_TERM_CONN, 50U);
 }
 
 static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
@@ -1333,8 +1357,7 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
     zmk_hogp_sniffer_screen_log_verbose_text(screen_emit_usage_state, "reconnect");
 #endif
 
-    bt_conn_unref(default_conn);
-    default_conn = NULL;
+    clear_default_conn_ref();
 
     for (size_t i = 0; i < prev_consumer_slot_count; i++) {
         (void)zmk_hogp_proxy_kscan_inject(0, (uint16_t)(CONSUMER_SLOT_BASE + prev_consumer_slots[i]),
@@ -1394,7 +1417,7 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
         zmk_hogp_sniffer_type_text_line(screen_emit_usage_state, "target sec fail");
 #endif
         step_security_policy_on_failure((int)err, "security_failed");
-        (void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+        schedule_security_disconnect(BT_HCI_ERR_REMOTE_USER_TERM_CONN, 50U);
         return;
     }
 
@@ -2255,6 +2278,7 @@ static int ble_hogp_sniffer_schedule_init(void) {
     k_work_init_delayable(&scan_cycle_work, scan_cycle_work_handler);
     k_work_init_delayable(&candidate_connect_work, candidate_connect_work_handler);
     k_work_init_delayable(&picker_probe_timeout_work, picker_probe_timeout_work_handler);
+    k_work_init_delayable(&security_disconnect_work, security_disconnect_work_handler);
     k_work_init(&picker_button_work, picker_button_work_handler);
     k_work_init_delayable(&sniffer_start_work, sniffer_start_work_handler);
     k_work_schedule(&sniffer_start_work, K_SECONDS(3));
