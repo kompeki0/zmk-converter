@@ -112,7 +112,7 @@ static const struct bt_le_conn_param target_conn_param = {
     .interval_min = 24, /* 30ms */
     .interval_max = 40, /* 50ms */
     .latency = 0,
-    .timeout = 800, /* 8s supervision timeout */
+    .timeout = 2000, /* 20s supervision timeout */
 };
 
 static uint8_t prev_usages[MAX_PRESSED_USAGES];
@@ -1160,7 +1160,7 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     if (err) {
         LOG_ERR("Connection failed (err 0x%02x: %s)", err, zmk_hogp_sniffer_hci_reason_to_str(err));
         if (err == BT_HCI_ERR_CONN_FAIL_TO_ESTAB || err == BT_HCI_ERR_UNKNOWN_CONN_ID) {
-            next_connect_allowed_ms = k_uptime_get() + 5000;
+            next_connect_allowed_ms = k_uptime_get() + 10000;
         }
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
         zmk_hogp_sniffer_screen_log_target_reason(
@@ -1230,7 +1230,7 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     if (derr && derr != -EALREADY) {
         LOG_WRN("bt_conn_le_param_update request failed (%d)", derr);
     } else {
-        LOG_INF("Requested stable conn params (30-50ms, lat=0, timeout=8s)");
+        LOG_INF("Requested stable conn params (30-50ms, lat=0, timeout=20s)");
     }
 
     LOG_INF("Requesting security L%u", (uint32_t)wanted_sec);
@@ -1287,7 +1287,7 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
             zmk_hogp_sniffer_hci_reason_to_str(reason));
     if (reason == BT_HCI_ERR_CONN_FAIL_TO_ESTAB || reason == BT_HCI_ERR_REMOTE_USER_TERM_CONN ||
         reason == BT_HCI_ERR_CONN_TIMEOUT) {
-        next_connect_allowed_ms = k_uptime_get() + 5000;
+        next_connect_allowed_ms = k_uptime_get() + 10000;
     }
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     zmk_hogp_sniffer_screen_log_target_addr(emit_usage_state, "target disconnected", peer);

@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
 
 #include "ble_hogp_sniffer_internal.h"
@@ -73,21 +72,16 @@ void zmk_hogp_sniffer_type_text_line(zmk_hogp_sniffer_emit_usage_cb_t emit_usage
 
         if (need_shift) {
             emit_usage(0xE1, true);
-            k_msleep(1);
         }
 
         emit_usage(usage, true);
-        k_msleep(1);
         emit_usage(usage, false);
 
         if (need_shift) {
-            k_msleep(1);
             emit_usage(0xE1, false);
         }
-        k_msleep(2);
     }
     emit_usage(0x28, true);
-    k_msleep(1);
     emit_usage(0x28, false);
 #else
     ARG_UNUSED(emit_usage);
