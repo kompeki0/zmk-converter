@@ -21,6 +21,8 @@
 #include <zmk/split/bluetooth/uuid.h>
 #include <zmk/usb.h>
 
+#include "ble_hogp_sniffer_internal.h"
+
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 #include <zmk/events/keycode_state_changed.h>
 #endif
@@ -163,13 +165,10 @@ static int save_persisted_target_meta(uint8_t sec_level_hint, const char *name, 
 static int load_persisted_target_meta(uint8_t *sec_level_hint, char *name, bool *has_name,
                                       bool *valid);
 static void clear_all_bonds_cb(const struct bt_bond_info *info, void *user_data);
-static const char *hci_reason_to_str(uint8_t reason);
-static const char *sec_err_to_str(enum bt_security_err err);
 static void step_security_policy_on_failure(int reason_code, const char *tag);
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 static void emit_usage_state(uint8_t usage, bool pressed);
-static void screen_log_target_reason(const char *prefix, uint8_t code, const char *reason);
 #endif
 
 int zmk_hogp_proxy_kscan_inject(uint16_t row, uint16_t col, bool pressed);
@@ -291,147 +290,9 @@ static bool usage_exists(const uint8_t *usages, size_t count, uint8_t usage) {
     return false;
 }
 
-static const char *hci_reason_to_str(uint8_t reason) {
-    switch (reason) {
-#ifdef BT_HCI_ERR_UNKNOWN_CONN_ID
-    case BT_HCI_ERR_UNKNOWN_CONN_ID:
-        return "unknown_conn_id";
-#endif
-#ifdef BT_HCI_ERR_AUTH_FAIL
-    case BT_HCI_ERR_AUTH_FAIL:
-        return "auth_fail";
-#endif
-#ifdef BT_HCI_ERR_PIN_OR_KEY_MISSING
-    case BT_HCI_ERR_PIN_OR_KEY_MISSING:
-        return "pin_or_key_missing";
-#endif
-#ifdef BT_HCI_ERR_CONN_TIMEOUT
-    case BT_HCI_ERR_CONN_TIMEOUT:
-        return "conn_timeout";
-#endif
-#ifdef BT_HCI_ERR_CONN_LIMIT_EXCEEDED
-    case BT_HCI_ERR_CONN_LIMIT_EXCEEDED:
-        return "conn_limit_exceeded";
-#endif
-#ifdef BT_HCI_ERR_CONN_FAIL_TO_ESTAB
-    case BT_HCI_ERR_CONN_FAIL_TO_ESTAB:
-        return "conn_fail_to_estab";
-#endif
-#ifdef BT_HCI_ERR_REMOTE_USER_TERM_CONN
-    case BT_HCI_ERR_REMOTE_USER_TERM_CONN:
-        return "remote_user_term";
-#endif
-#ifdef BT_HCI_ERR_REMOTE_LOW_RESOURCES
-    case BT_HCI_ERR_REMOTE_LOW_RESOURCES:
-        return "remote_low_resources";
-#endif
-#ifdef BT_HCI_ERR_REMOTE_POWER_OFF
-    case BT_HCI_ERR_REMOTE_POWER_OFF:
-        return "remote_power_off";
-#endif
-#ifdef BT_HCI_ERR_UNSUPP_REMOTE_FEATURE
-    case BT_HCI_ERR_UNSUPP_REMOTE_FEATURE:
-        return "unsupported_remote_feature";
-#endif
-#ifdef BT_HCI_ERR_PAIRING_NOT_SUPPORTED
-    case BT_HCI_ERR_PAIRING_NOT_SUPPORTED:
-        return "pairing_not_supported";
-#endif
-#ifdef BT_HCI_ERR_UNACCEPT_CONN_PARAM
-    case BT_HCI_ERR_UNACCEPT_CONN_PARAM:
-        return "unacceptable_conn_param";
-#endif
-#ifdef BT_HCI_ERR_ADV_TIMEOUT
-    case BT_HCI_ERR_ADV_TIMEOUT:
-        return "adv_timeout";
-#endif
-#ifdef BT_HCI_ERR_TERM_DUE_TO_MIC_FAIL
-    case BT_HCI_ERR_TERM_DUE_TO_MIC_FAIL:
-        return "mic_fail";
-#endif
-    default:
-        if (reason == 22U) {
-            return "local_host_term";
-        }
-        return "unknown";
-    }
-}
-
-static const char *sec_err_to_str(enum bt_security_err err) {
-    switch (err) {
-#ifdef BT_SECURITY_ERR_SUCCESS
-    case BT_SECURITY_ERR_SUCCESS:
-        return "success";
-#endif
-#ifdef BT_SECURITY_ERR_AUTH_FAIL
-    case BT_SECURITY_ERR_AUTH_FAIL:
-        return "auth_fail";
-#endif
-#ifdef BT_SECURITY_ERR_PIN_OR_KEY_MISSING
-    case BT_SECURITY_ERR_PIN_OR_KEY_MISSING:
-        return "pin_or_key_missing";
-#endif
-#ifdef BT_SECURITY_ERR_OOB_NOT_AVAILABLE
-    case BT_SECURITY_ERR_OOB_NOT_AVAILABLE:
-        return "oob_not_available";
-#endif
-#ifdef BT_SECURITY_ERR_AUTH_REQUIREMENT
-    case BT_SECURITY_ERR_AUTH_REQUIREMENT:
-        return "auth_requirement";
-#endif
-#ifdef BT_SECURITY_ERR_PAIR_NOT_SUPPORTED
-    case BT_SECURITY_ERR_PAIR_NOT_SUPPORTED:
-        return "pair_not_supported";
-#endif
-#ifdef BT_SECURITY_ERR_PAIR_NOT_ALLOWED
-    case BT_SECURITY_ERR_PAIR_NOT_ALLOWED:
-        return "pair_not_allowed";
-#endif
-#ifdef BT_SECURITY_ERR_INVALID_PARAM
-    case BT_SECURITY_ERR_INVALID_PARAM:
-        return "invalid_param";
-#endif
-#ifdef BT_SECURITY_ERR_UNSPECIFIED
-    case BT_SECURITY_ERR_UNSPECIFIED:
-        return "unspecified";
-#endif
-#ifdef BT_SECURITY_ERR_CONFIRM_VALUE_FAILED
-    case BT_SECURITY_ERR_CONFIRM_VALUE_FAILED:
-        return "confirm_value_failed";
-#endif
-#ifdef BT_SECURITY_ERR_PAIRING_IN_PROGRESS
-    case BT_SECURITY_ERR_PAIRING_IN_PROGRESS:
-        return "pairing_in_progress";
-#endif
-#ifdef BT_SECURITY_ERR_CROSS_TRANSP_NOT_ALLOWED
-    case BT_SECURITY_ERR_CROSS_TRANSP_NOT_ALLOWED:
-        return "cross_transport_not_allowed";
-#endif
-    default:
-        if ((int)err == 4) {
-            return "auth_requirement";
-        }
-        if ((int)err == 5) {
-            return "pair_not_supported";
-        }
-        return "unknown";
-    }
-}
-
-static bt_security_t sec_policy_level_for_idx(uint8_t idx) {
-    switch (idx) {
-    case 0U:
-        return BT_SECURITY_L3;
-    case 1U:
-        return BT_SECURITY_L2;
-    default:
-        return BT_SECURITY_L1;
-    }
-}
-
 static bt_security_t get_desired_security_level(void) {
     if (sec_policy_cycle_active) {
-        return sec_policy_level_for_idx(sec_policy_try_idx);
+        return zmk_hogp_sniffer_sec_policy_level_for_idx(sec_policy_try_idx);
     }
 
     if (target_sec_hint_valid) {
@@ -471,7 +332,8 @@ static void step_security_policy_on_failure(int reason_code, const char *tag) {
             (uint32_t)prev_level, (uint32_t)next_level, (uint32_t)(sec_policy_try_idx + 1U),
             (long long)(next_connect_allowed_ms - now));
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-    screen_log_target_reason("sec policy", (uint8_t)next_level, "next security level");
+    zmk_hogp_sniffer_screen_log_target_reason(emit_usage_state, "sec policy",
+                                              (uint8_t)next_level, "next security level");
 #endif
     ARG_UNUSED(reason_code);
 }
@@ -591,94 +453,6 @@ static void emit_usage_state(uint8_t usage, bool pressed) {
 }
 #endif
 
-static bool is_ascii_alnum(uint8_t c) {
-    return ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'));
-}
-
-#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-static bool char_to_usage(char c, uint8_t *usage, bool *need_shift) {
-    *need_shift = false;
-
-    if (c >= 'a' && c <= 'z') {
-        *usage = (uint8_t)(0x04 + (c - 'a'));
-        return true;
-    }
-    if (c >= 'A' && c <= 'Z') {
-        *usage = (uint8_t)(0x04 + (c - 'A'));
-        *need_shift = true;
-        return true;
-    }
-    if (c >= '1' && c <= '9') {
-        *usage = (uint8_t)(0x1E + (c - '1'));
-        return true;
-    }
-    if (c == '0') {
-        *usage = 0x27;
-        return true;
-    }
-    if (c == ' ') {
-        *usage = 0x2C;
-        return true;
-    }
-    if (c == '\n') {
-        *usage = 0x28;
-        return true;
-    }
-    if (c == '-') {
-        *usage = 0x2D;
-        return true;
-    }
-    if (c == ':') {
-        *usage = 0x33;
-        *need_shift = true;
-        return true;
-    }
-    if (c == '*') {
-        *usage = 0x25;
-        *need_shift = true;
-        return true;
-    }
-    if (c == ';') {
-        *usage = 0x33;
-        return true;
-    }
-    return false;
-}
-
-static void type_text_line(const char *text) {
-    if (!IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)) {
-        return;
-    }
-
-    for (size_t i = 0; text[i] != '\0'; i++) {
-        uint8_t usage;
-        bool need_shift;
-
-        if (!char_to_usage(text[i], &usage, &need_shift)) {
-            continue;
-        }
-
-        if (need_shift) {
-            emit_usage_state(0xE1, true);
-            k_msleep(1);
-        }
-
-        emit_usage_state(usage, true);
-        k_msleep(1);
-        emit_usage_state(usage, false);
-
-        if (need_shift) {
-            k_msleep(1);
-            emit_usage_state(0xE1, false);
-        }
-        k_msleep(2);
-    }
-    emit_usage_state(0x28, true);
-    k_msleep(1);
-    emit_usage_state(0x28, false);
-}
-#endif
-
 struct ad_name_ctx {
     char *out;
     size_t cap;
@@ -699,7 +473,7 @@ static bool ad_parse_name_cb(struct bt_data *data, void *user_data) {
 
     for (size_t i = 0; i < data->data_len && ctx->len + 1 < ctx->cap; i++) {
         uint8_t c = data->data[i];
-        if (is_ascii_alnum(c)) {
+        if (zmk_hogp_sniffer_is_ascii_alnum(c)) {
             ctx->out[ctx->len++] = (char)c;
         } else {
             /* Keep length/shape of name while avoiding unsupported glyphs. */
@@ -784,7 +558,7 @@ static void picker_announce_current(const char *prefix) {
         snprintf(buf, sizeof(buf), "%s 0 RESETALL", prefix);
         LOG_INF("%s", buf);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-        type_text_line(buf);
+        zmk_hogp_sniffer_type_text_line(emit_usage_state, buf);
 #endif
         return;
     }
@@ -793,7 +567,7 @@ static void picker_announce_current(const char *prefix) {
         snprintf(buf, sizeof(buf), "%s 1 OTHER(%u)", prefix, (uint32_t)picker_unknown_count);
         LOG_INF("%s", buf);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-        type_text_line(buf);
+        zmk_hogp_sniffer_type_text_line(emit_usage_state, buf);
 #endif
         return;
     }
@@ -802,61 +576,9 @@ static void picker_announce_current(const char *prefix) {
              picker_devices[picker_selected_index - 2U].name);
     LOG_INF("%s", buf);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-    type_text_line(buf);
+    zmk_hogp_sniffer_type_text_line(emit_usage_state, buf);
 #endif
 }
-
-#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-static void screen_log_target_addr(const char *prefix, const bt_addr_le_t *addr) {
-    char line[64];
-    char addr_str[BT_ADDR_LE_STR_LEN];
-
-    if (!addr) {
-        return;
-    }
-
-    bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
-    snprintf(line, sizeof(line), "%s %s", prefix, addr_str);
-    type_text_line(line);
-}
-
-static void screen_log_target_code(const char *prefix, uint8_t code) {
-    char line[64];
-    snprintf(line, sizeof(line), "%s %u", prefix, (uint32_t)code);
-    type_text_line(line);
-}
-
-static void screen_log_target_reason(const char *prefix, uint8_t code, const char *reason) {
-    char line[96];
-    char rs[32];
-    size_t j = 0U;
-
-    for (size_t i = 0; reason && reason[i] != '\0' && j + 1U < sizeof(rs); i++) {
-        uint8_t c = (uint8_t)reason[i];
-        rs[j++] = is_ascii_alnum(c) ? (char)c : 'x';
-    }
-    rs[j] = '\0';
-
-    snprintf(line, sizeof(line), "%s %u %s", prefix, (uint32_t)code, rs[0] ? rs : "unknown");
-    type_text_line(line);
-}
-
-static void screen_log_verbose_code(const char *prefix, uint32_t code) {
-    char line[64];
-    if (!IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_SCREEN_LOG_VERBOSE)) {
-        return;
-    }
-    snprintf(line, sizeof(line), "%s %u", prefix, code);
-    type_text_line(line);
-}
-
-static void screen_log_verbose_text(const char *text) {
-    if (!IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_SCREEN_LOG_VERBOSE)) {
-        return;
-    }
-    type_text_line(text);
-}
-#endif
 
 static void picker_add_or_update(const bt_addr_le_t *addr, const char *name, int8_t rssi) {
     int idx = picker_find_index_by_addr(addr);
@@ -1243,7 +965,7 @@ static uint8_t notify_cb(struct bt_conn *conn, struct bt_gatt_subscribe_params *
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     if (!target_ready_announced) {
-        type_text_line("target ready");
+        zmk_hogp_sniffer_type_text_line(emit_usage_state, "target ready");
         target_ready_announced = true;
     }
 #endif
@@ -1297,7 +1019,8 @@ static uint8_t discover_ccc_cb(struct bt_conn *conn, const struct bt_gatt_attr *
         if (err) {
             LOG_ERR("bt_gatt_subscribe failed for vh=0x%04x (%d)", pending_report_value_handle, err);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-            screen_log_verbose_code("sub err", (uint32_t)(-err));
+            zmk_hogp_sniffer_screen_log_verbose_code(emit_usage_state, "sub err",
+                                                     (uint32_t)(-err));
 #endif
         } else {
             reconnect_fail_count = 0;
@@ -1306,7 +1029,7 @@ static uint8_t discover_ccc_cb(struct bt_conn *conn, const struct bt_gatt_attr *
             LOG_INF("Subscribed Input Report #%u (vh=0x%04x ccc=0x%04x)", report_sub_count,
                     pending_report_value_handle, attr->handle);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-            screen_log_verbose_code("sub ok", report_sub_count);
+            zmk_hogp_sniffer_screen_log_verbose_code(emit_usage_state, "sub ok", report_sub_count);
 #endif
         }
     }
@@ -1329,14 +1052,14 @@ static uint8_t discover_report_cb(struct bt_conn *conn, const struct bt_gatt_att
         if (report_sub_count == 0) {
             LOG_ERR("No notifiable Input Report characteristic subscribed");
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-            screen_log_verbose_text("no report sub");
+            zmk_hogp_sniffer_screen_log_verbose_text(emit_usage_state, "no report sub");
 #endif
         } else {
             LOG_INF("Report discovery complete (subscriptions=%u)", report_sub_count);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-            type_text_line("target ready");
-            type_text_line("input stream on");
-            screen_log_verbose_code("sub total", report_sub_count);
+            zmk_hogp_sniffer_type_text_line(emit_usage_state, "target ready");
+            zmk_hogp_sniffer_type_text_line(emit_usage_state, "input stream on");
+            zmk_hogp_sniffer_screen_log_verbose_code(emit_usage_state, "sub total", report_sub_count);
 #endif
         }
         return BT_GATT_ITER_STOP;
@@ -1391,12 +1114,13 @@ static uint8_t discover_hids_cb(struct bt_conn *conn, const struct bt_gatt_attr 
     if (err) {
         LOG_ERR("Report characteristic discovery failed (%d)", err);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-        screen_log_verbose_code("report disc err", (uint32_t)(-err));
+        zmk_hogp_sniffer_screen_log_verbose_code(emit_usage_state, "report disc err",
+                                                 (uint32_t)(-err));
 #endif
     } else {
         LOG_INF("HID service found, discovering Input Report characteristics");
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-        screen_log_verbose_text("hids found");
+        zmk_hogp_sniffer_screen_log_verbose_text(emit_usage_state, "hids found");
 #endif
     }
 
@@ -1434,12 +1158,13 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     connecting = false;
 
     if (err) {
-        LOG_ERR("Connection failed (err 0x%02x: %s)", err, hci_reason_to_str(err));
+        LOG_ERR("Connection failed (err 0x%02x: %s)", err, zmk_hogp_sniffer_hci_reason_to_str(err));
         if (err == BT_HCI_ERR_CONN_FAIL_TO_ESTAB || err == BT_HCI_ERR_UNKNOWN_CONN_ID) {
             next_connect_allowed_ms = k_uptime_get() + 5000;
         }
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-        screen_log_target_reason("target connect err", err, hci_reason_to_str(err));
+        zmk_hogp_sniffer_screen_log_target_reason(
+            emit_usage_state, "target connect err", err, zmk_hogp_sniffer_hci_reason_to_str(err));
 #endif
         bt_conn_unref(default_conn);
         default_conn = NULL;
@@ -1458,13 +1183,13 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     if (sec_policy_cycle_active) {
         LOG_WRN("Using security policy step L%u", (uint32_t)wanted_sec);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-        type_text_line("sec policy step");
+        zmk_hogp_sniffer_type_text_line(emit_usage_state, "sec policy step");
 #endif
     }
     target_ready_announced = false;
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-    screen_log_target_addr("target connected", peer);
-    type_text_line("target link up");
+    zmk_hogp_sniffer_screen_log_target_addr(emit_usage_state, "target connected", peer);
+    zmk_hogp_sniffer_type_text_line(emit_usage_state, "target link up");
 #endif
     if (picker_name_probe_active) {
         memset(&picker_name_read_params, 0, sizeof(picker_name_read_params));
@@ -1523,7 +1248,7 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     if (derr == 0) {
         /* Wait for security_changed callback, then start discovery. */
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-        screen_log_verbose_text("wait sec");
+        zmk_hogp_sniffer_screen_log_verbose_text(emit_usage_state, "wait sec");
 #endif
         return;
     }
@@ -1552,21 +1277,23 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
         host_connected = false;
         LOG_INF("Host PC disconnected (reason 0x%02x)", reason);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-        screen_log_verbose_code("host disc", reason);
+        zmk_hogp_sniffer_screen_log_verbose_code(emit_usage_state, "host disc", reason);
 #endif
     }
         return;
     }
 
-    LOG_INF("Disconnected (reason 0x%02x: %s)", reason, hci_reason_to_str(reason));
+    LOG_INF("Disconnected (reason 0x%02x: %s)", reason,
+            zmk_hogp_sniffer_hci_reason_to_str(reason));
     if (reason == BT_HCI_ERR_CONN_FAIL_TO_ESTAB || reason == BT_HCI_ERR_REMOTE_USER_TERM_CONN ||
         reason == BT_HCI_ERR_CONN_TIMEOUT) {
         next_connect_allowed_ms = k_uptime_get() + 5000;
     }
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-    screen_log_target_addr("target disconnected", peer);
-    screen_log_target_reason("target disc reason", reason, hci_reason_to_str(reason));
-    screen_log_verbose_text("reconnect");
+    zmk_hogp_sniffer_screen_log_target_addr(emit_usage_state, "target disconnected", peer);
+    zmk_hogp_sniffer_screen_log_target_reason(
+        emit_usage_state, "target disc reason", reason, zmk_hogp_sniffer_hci_reason_to_str(reason));
+    zmk_hogp_sniffer_screen_log_verbose_text(emit_usage_state, "reconnect");
 #endif
 
     bt_conn_unref(default_conn);
@@ -1618,10 +1345,10 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
 
     if (err) {
         LOG_WRN("Security changed failed (level %u, err %d: %s)", (uint32_t)level, (int)err,
-                sec_err_to_str(err));
+                zmk_hogp_sniffer_sec_err_to_str(err));
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-        screen_log_verbose_code("sec err", (uint32_t)err);
-        type_text_line("target sec fail");
+        zmk_hogp_sniffer_screen_log_verbose_code(emit_usage_state, "sec err", (uint32_t)err);
+        zmk_hogp_sniffer_type_text_line(emit_usage_state, "target sec fail");
 #endif
         step_security_policy_on_failure((int)err, "security_failed");
         if (!gatt_discovery_started) {
@@ -1653,12 +1380,12 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
     if (derr) {
         LOG_ERR("HID discovery start failed (%d)", derr);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-        screen_log_verbose_code("disc err", (uint32_t)derr);
+        zmk_hogp_sniffer_screen_log_verbose_code(emit_usage_state, "disc err", (uint32_t)derr);
 #endif
     } else {
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-        type_text_line("target secure");
-        screen_log_verbose_text("disc hids");
+        zmk_hogp_sniffer_type_text_line(emit_usage_state, "target secure");
+        zmk_hogp_sniffer_screen_log_verbose_text(emit_usage_state, "disc hids");
 #endif
     }
 }
@@ -1670,10 +1397,12 @@ static void pairing_complete_cb(struct bt_conn *conn, bool bonded) {
 
 static void pairing_failed_cb(struct bt_conn *conn, enum bt_security_err reason) {
     ARG_UNUSED(conn);
-    LOG_WRN("Pairing failed (reason=%d: %s)", (int)reason, sec_err_to_str(reason));
+    LOG_WRN("Pairing failed (reason=%d: %s)", (int)reason,
+            zmk_hogp_sniffer_sec_err_to_str(reason));
     step_security_policy_on_failure((int)reason, "pair_failed");
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-    screen_log_target_reason("pair fail", (uint8_t)reason, sec_err_to_str(reason));
+    zmk_hogp_sniffer_screen_log_target_reason(
+        emit_usage_state, "pair fail", (uint8_t)reason, zmk_hogp_sniffer_sec_err_to_str(reason));
 #endif
 }
 
@@ -1820,7 +1549,7 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
         LOG_INF("Target candidate #%u found in scan cycle (rssi=%d type=%u)", candidate_count, rssi,
                 adv_type);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-        screen_log_verbose_code("cand", candidate_count);
+        zmk_hogp_sniffer_screen_log_verbose_code(emit_usage_state, "cand", candidate_count);
 #endif
     } else {
         LOG_DBG("Candidate list full, dropping additional match");
@@ -1875,7 +1604,7 @@ static int start_scan(void) {
     if (!host_ready_for_target_scan()) {
         LOG_INF("Waiting host PC connection before target scan");
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-        screen_log_verbose_text("wait host pc");
+        zmk_hogp_sniffer_screen_log_verbose_text(emit_usage_state, "wait host pc");
 #endif
         return 0;
     }
@@ -1897,7 +1626,7 @@ static int start_scan(void) {
             CONFIG_ZMK_BLE_HOGP_SNIFFER_SCAN_CYCLE_MS,
             IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_SCAN_FILTER_DUPLICATE) ? 1U : 0U);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-    screen_log_verbose_text("scan start");
+    zmk_hogp_sniffer_screen_log_verbose_text(emit_usage_state, "scan start");
 #endif
     return 0;
 }
@@ -1913,7 +1642,7 @@ static int connect_to_candidate(const bt_addr_le_t *addr) {
 
     connecting = true;
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-    screen_log_verbose_text("connect try");
+    zmk_hogp_sniffer_screen_log_verbose_text(emit_usage_state, "connect try");
 #endif
     err = bt_conn_le_create(addr, BT_CONN_LE_CREATE_CONN, BT_LE_CONN_PARAM_DEFAULT, &default_conn);
     if (err) {
@@ -1942,7 +1671,7 @@ static uint8_t picker_name_read_cb(struct bt_conn *conn, uint8_t err, struct bt_
         name[n] = '\0';
         for (size_t i = 0; i < n; i++) {
             uint8_t c = (uint8_t)name[i];
-            if (!is_ascii_alnum(c)) {
+            if (!zmk_hogp_sniffer_is_ascii_alnum(c)) {
                 name[i] = 'x';
             }
         }
@@ -1995,7 +1724,8 @@ static void candidate_connect_work_handler(struct k_work *work) {
         LOG_INF("Trying candidate %u/%u", (uint8_t)(candidate_index + 1U), candidate_count);
     }
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-    screen_log_verbose_code("try idx", (uint32_t)(candidate_index + 1U));
+    zmk_hogp_sniffer_screen_log_verbose_code(emit_usage_state, "try idx",
+                                             (uint32_t)(candidate_index + 1U));
 #endif
     err = connect_to_candidate(&candidate_addrs[candidate_index]);
     if (err == -EAGAIN) {
