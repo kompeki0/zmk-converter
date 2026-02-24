@@ -95,6 +95,7 @@ static uint8_t report_sub_count;
 static uint16_t pending_report_char_handle;
 static uint16_t pending_report_value_handle;
 static bool target_ready_announced;
+static bool security_failure_latched;
 static struct bt_gatt_read_params picker_name_read_params;
 static bool picker_name_probe_active;
 static bt_addr_le_t picker_unknown_addrs[MAX_PICKER_DEVICES];
@@ -332,8 +333,10 @@ static void step_security_policy_on_failure(int reason_code, const char *tag) {
             (uint32_t)prev_level, (uint32_t)next_level, (uint32_t)(sec_policy_try_idx + 1U),
             (long long)(next_connect_allowed_ms - now));
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-    zmk_hogp_sniffer_screen_log_target_reason(emit_usage_state, "sec policy",
-                                              (uint8_t)next_level, "next security level");
+    if (next_level != prev_level) {
+        zmk_hogp_sniffer_screen_log_target_reason(emit_usage_state, "sec policy",
+                                                  (uint8_t)next_level, "next security level");
+    }
 #endif
     ARG_UNUSED(reason_code);
 }
@@ -1175,11 +1178,20 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
             picker_try_next_name_probe();
             return;
         }
+        if (err == BT_HCI_ERR_UNKNOWN_CONN_ID) {
+            /* Tear down candidate chain on stale-conn race and restart from scan after cooldown. */
+            in_candidate_sequence = false;
+            candidate_count = 0;
+            candidate_index = 0;
+            schedule_scan_restart();
+            return;
+        }
         (void)try_next_candidate_or_rescan();
         return;
     }
 
     LOG_INF("Connected to target");
+    security_failure_latched = false;
     if (sec_policy_cycle_active) {
         LOG_WRN("Using security policy step L%u", (uint32_t)wanted_sec);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
@@ -1320,6 +1332,7 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
     }
 #endif
     prev_usage_count = 0;
+    security_failure_latched = false;
     apply_host_adv_policy(should_wait_for_host() ? true : false);
 
     if (reconnect_fail_count < UINT8_MAX) {
@@ -1344,6 +1357,10 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
     }
 
     if (err) {
+        if (security_failure_latched) {
+            return;
+        }
+        security_failure_latched = true;
         LOG_WRN("Security changed failed (level %u, err %d: %s)", (uint32_t)level, (int)err,
                 zmk_hogp_sniffer_sec_err_to_str(err));
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
@@ -1397,6 +1414,10 @@ static void pairing_complete_cb(struct bt_conn *conn, bool bonded) {
 
 static void pairing_failed_cb(struct bt_conn *conn, enum bt_security_err reason) {
     ARG_UNUSED(conn);
+    if (security_failure_latched) {
+        return;
+    }
+    security_failure_latched = true;
     LOG_WRN("Pairing failed (reason=%d: %s)", (int)reason,
             zmk_hogp_sniffer_sec_err_to_str(reason));
     step_security_policy_on_failure((int)reason, "pair_failed");
