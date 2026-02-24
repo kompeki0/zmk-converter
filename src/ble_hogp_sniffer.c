@@ -904,6 +904,33 @@ static void process_nkro12_report(const uint8_t *report, size_t report_len) {
     memcpy(prev_consumer_slots, curr_slots, curr_slot_count);
 }
 
+static void handle_input_report_bytes(const uint8_t *data, uint16_t length) {
+    const uint8_t *p = data;
+    uint16_t len = length;
+
+    if (!p || len == 0U) {
+        return;
+    }
+
+    /* Some devices prepend Report ID. If len is not recognized, try stripping 1 byte. */
+    if (len != BOOT_KBD_REPORT_LEN && len != 12U && len > 1U) {
+        uint8_t rid = p[0];
+        if (rid >= 1U && rid <= 32U) {
+            p++;
+            len--;
+            LOG_DBG("Assume Report ID=%u, strip 1 byte -> len=%u", rid, len);
+        }
+    }
+
+    if (len == BOOT_KBD_REPORT_LEN) {
+        process_boot_report(p, len);
+    } else if (len == 12U) {
+        process_nkro12_report(p, len);
+    } else {
+        LOG_DBG("Unsupported report format for key mapper (len=%u)", len);
+    }
+}
+
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_CLEAR_NON_TARGET_BONDS_ON_START)
 struct clear_bonds_ctx {
     bt_addr_le_t keep;
@@ -988,13 +1015,7 @@ static uint8_t notify_cb(struct bt_conn *conn, struct bt_gatt_subscribe_params *
     candidate_count = 0;
     candidate_index = 0;
 
-    if (length == BOOT_KBD_REPORT_LEN) {
-        process_boot_report(data, length);
-    } else if (length == 12U) {
-        process_nkro12_report(data, length);
-    } else {
-        LOG_DBG("Unsupported report format for key mapper (len=%u, sub=%u)", length, sub_idx);
-    }
+    handle_input_report_bytes(data, length);
     return BT_GATT_ITER_CONTINUE;
 }
 
@@ -1277,18 +1298,9 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
         return;
     }
 
-    /* Some stacks can transiently fail set_security (e.g. -ENOMEM). Do not
-     * bounce the link immediately; fallback to discovery and let security
-     * progress in parallel if possible.
-     */
-    LOG_WRN("bt_conn_set_security failed (%d), fallback to discovery", derr);
-    if (!gatt_discovery_started) {
-        gatt_discovery_started = true;
-        derr = discover_hids(conn);
-        if (derr) {
-            LOG_ERR("HID discovery start failed (%d)", derr);
-        }
-    }
+    LOG_WRN("bt_conn_set_security failed (%d), reconnect with next security policy", derr);
+    step_security_policy_on_failure(derr, "set_security_failed");
+    (void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 }
 
 static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
@@ -1382,14 +1394,7 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
         zmk_hogp_sniffer_type_text_line(screen_emit_usage_state, "target sec fail");
 #endif
         step_security_policy_on_failure((int)err, "security_failed");
-        if (!gatt_discovery_started) {
-            LOG_WRN("Security failed; trying HID discovery fallback");
-            gatt_discovery_started = true;
-            derr = discover_hids(conn);
-            if (derr) {
-                LOG_ERR("HID discovery fallback failed (%d)", derr);
-            }
-        }
+        (void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
         return;
     }
 
@@ -1688,7 +1693,7 @@ static int connect_to_candidate(const bt_addr_le_t *addr) {
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     zmk_hogp_sniffer_screen_log_verbose_text(screen_emit_usage_state, "connect try");
 #endif
-    err = bt_conn_le_create(addr, BT_CONN_LE_CREATE_CONN, BT_LE_CONN_PARAM_DEFAULT, &default_conn);
+    err = bt_conn_le_create(addr, BT_CONN_LE_CREATE_CONN, &target_conn_param, &default_conn);
     if (err) {
         connecting = false;
         default_conn = NULL;
