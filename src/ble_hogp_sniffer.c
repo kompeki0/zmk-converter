@@ -1862,7 +1862,8 @@ static void scan_cycle_work_handler(struct k_work *work) {
     candidate_index = 0;
 
     LOG_INF("Scan cycle ended, trying candidate 1/%u", candidate_count);
-    schedule_connect_current_candidate(0U);
+    /* Avoid controller state race right after scan stop. */
+    schedule_connect_current_candidate(200U);
 }
 
 static void reconnect_work_handler(struct k_work *work) {
