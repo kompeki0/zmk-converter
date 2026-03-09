@@ -108,6 +108,7 @@ static uint16_t pending_report_char_handle;
 static uint16_t pending_report_value_handle;
 static bool target_ready_announced;
 static bool security_failure_latched;
+static bool security_upgrade_attempted;
 static bool screen_typing_enabled;
 static struct bt_gatt_read_params picker_name_read_params;
 static bool picker_name_probe_active;
@@ -1678,6 +1679,7 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
 
     LOG_INF("Connected to target");
     security_failure_latched = false;
+    security_upgrade_attempted = false;
     screen_typing_enabled = false;
     if (sec_policy_cycle_active) {
         LOG_WRN("Using security policy step L%u", (uint32_t)wanted_sec);
@@ -1823,6 +1825,7 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
 #endif
     prev_usage_count = 0;
     security_failure_latched = false;
+    security_upgrade_attempted = false;
     screen_typing_enabled = true;
     apply_host_adv_policy(should_wait_for_host() ? true : false);
 
@@ -1848,6 +1851,25 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
     }
 
     if (err) {
+        bool auth_requirement = ((int)err == 4);
+#ifdef BT_SECURITY_ERR_AUTH_REQUIREMENT
+        if (err == BT_SECURITY_ERR_AUTH_REQUIREMENT) {
+            auth_requirement = true;
+        }
+#endif
+
+        if (auth_requirement && !security_upgrade_attempted && wanted_sec < BT_SECURITY_L3) {
+            bt_security_t next_sec = (wanted_sec == BT_SECURITY_L1) ? BT_SECURITY_L2 : BT_SECURITY_L3;
+            security_upgrade_attempted = true;
+            LOG_WRN("Security requires stronger level, retry in-place: L%u -> L%u",
+                    (uint32_t)wanted_sec, (uint32_t)next_sec);
+            derr = bt_conn_set_security(conn, next_sec);
+            if (derr == 0 || derr == -EALREADY) {
+                return;
+            }
+            LOG_WRN("In-place security upgrade failed (%d)", derr);
+        }
+
         if (security_failure_latched) {
             return;
         }
@@ -1873,6 +1895,7 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
 
     sec_policy_cycle_active = false;
     sec_policy_try_idx = 0U;
+    security_upgrade_attempted = false;
     target_sec_level_hint = (uint8_t)level;
     target_sec_hint_valid = true;
     (void)save_persisted_target_meta(target_sec_level_hint, target_name, target_name_valid);
@@ -1913,6 +1936,91 @@ static void pairing_failed_cb(struct bt_conn *conn, enum bt_security_err reason)
 }
 
 #if defined(CONFIG_BT_SMP)
+static enum bt_security_err auth_pairing_accept_cb(struct bt_conn *conn,
+                                                   const struct bt_conn_pairing_feat *const feat) {
+    struct bt_conn_info info;
+    char addr[BT_ADDR_LE_STR_LEN];
+
+    ARG_UNUSED(feat);
+    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+
+    if (bt_conn_get_info(conn, &info) != 0) {
+        LOG_WRN("Pairing accept: info unavailable for %s, allowing", addr);
+        return BT_SECURITY_ERR_SUCCESS;
+    }
+
+    if (info.role == BT_CONN_ROLE_CENTRAL) {
+        LOG_INF("Pairing request from target accepted: %s", addr);
+    }
+    return BT_SECURITY_ERR_SUCCESS;
+}
+
+static void auth_passkey_display_cb(struct bt_conn *conn, unsigned int passkey) {
+    char addr[BT_ADDR_LE_STR_LEN];
+
+    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+    LOG_INF("Passkey display for %s: %06u", addr, passkey);
+}
+
+static void auth_passkey_entry_cb(struct bt_conn *conn) {
+    char addr[BT_ADDR_LE_STR_LEN];
+
+    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+    LOG_WRN("Passkey entry requested by %s (entry UI is not implemented in sniffer)", addr);
+}
+
+static void auth_passkey_confirm_cb(struct bt_conn *conn, unsigned int passkey) {
+    char addr[BT_ADDR_LE_STR_LEN];
+
+    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+    LOG_WRN("Numeric comparison requested by %s: %06u", addr, passkey);
+
+    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_AUTH_AUTO_CONFIRM)) {
+        int err = bt_conn_auth_passkey_confirm(conn);
+        if (err && err != -EALREADY) {
+            LOG_WRN("bt_conn_auth_passkey_confirm failed (%d)", err);
+            return;
+        }
+        LOG_INF("Numeric comparison auto-confirmed");
+    } else {
+        LOG_WRN("Auto-confirm disabled; pairing may fail if confirmation is required");
+    }
+}
+
+static void auth_pairing_confirm_cb(struct bt_conn *conn) {
+    char addr[BT_ADDR_LE_STR_LEN];
+
+    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+    LOG_WRN("Pairing confirm requested by %s", addr);
+
+    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_AUTH_AUTO_CONFIRM)) {
+        int err = bt_conn_auth_pairing_confirm(conn);
+        if (err && err != -EALREADY) {
+            LOG_WRN("bt_conn_auth_pairing_confirm failed (%d)", err);
+            return;
+        }
+        LOG_INF("Pairing confirm auto-accepted");
+    } else {
+        LOG_WRN("Auto-confirm disabled; pairing may fail if confirmation is required");
+    }
+}
+
+static void auth_cancel_cb(struct bt_conn *conn) {
+    char addr[BT_ADDR_LE_STR_LEN];
+
+    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+    LOG_WRN("Pairing cancelled by peer: %s", addr);
+}
+
+static struct bt_conn_auth_cb auth_cb = {
+    .pairing_accept = auth_pairing_accept_cb,
+    .passkey_display = auth_passkey_display_cb,
+    .passkey_entry = auth_passkey_entry_cb,
+    .passkey_confirm = auth_passkey_confirm_cb,
+    .pairing_confirm = auth_pairing_confirm_cb,
+    .cancel = auth_cancel_cb,
+};
+
 static struct bt_conn_auth_info_cb auth_info_cb = {
     .pairing_complete = pairing_complete_cb,
     .pairing_failed = pairing_failed_cb,
@@ -2637,6 +2745,11 @@ static int ble_hogp_sniffer_init(void) {
     }
 
 #if defined(CONFIG_BT_SMP)
+    err = bt_conn_auth_cb_register(&auth_cb);
+    if (err && err != -EALREADY) {
+        LOG_WRN("bt_conn_auth_cb_register failed (%d)", err);
+    }
+
     err = bt_conn_auth_info_cb_register(&auth_info_cb);
     if (err && err != -EALREADY) {
         LOG_WRN("bt_conn_auth_info_cb_register failed (%d)", err);

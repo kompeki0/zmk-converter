@@ -91,6 +91,16 @@ config ZMK_BLE_HOGP_SNIFFER_SECURITY_LEVEL
       1=unencrypted, 2=encrypted, 3=encrypted+MITM, 4=LE Secure Connections.
       If a target rejects higher levels, lower this to improve first-pair success.
 
+config ZMK_BLE_HOGP_SNIFFER_AUTH_AUTO_CONFIRM
+    bool "Auto-confirm pairing prompts (numeric comparison / pairing confirm)"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    depends on BT_SMP
+    default y
+    help
+      Automatically accept user-confirmation style pairing prompts received
+      while connecting to the target device. Disable this to inspect the
+      requested flow in logs without auto-confirming.
+
 config ZMK_BLE_HOGP_SNIFFER_SINGLE_TARGET_ONLY
     bool "After HID is verified, reconnect only to the single target"
     depends on ZMK_BLE_HOGP_SNIFFER
