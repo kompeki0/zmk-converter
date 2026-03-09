@@ -264,6 +264,17 @@ static bool usage_to_row_col(uint8_t usage, uint16_t *row, uint16_t *col) {
         0x5C, 0x5D, 0x5E,              /* KP4, KP5, KP6 */
         0x59, 0x5A, 0x5B, 0x58,        /* KP1, KP2, KP3, KP_ENTER */
         0x62, 0x63,                    /* KP0, KP. */
+
+        /* JIS/IME keys */
+        0x88,                          /* INT_KANA (International 2) */
+        0x8A,                          /* INT_HENKAN (International 4) */
+        0x8B,                          /* INT_MUHENKAN (International 5) */
+        0x90,                          /* LANG1 (IME/Kana on many layouts) */
+        0x91,                          /* LANG2 (Eisu on many layouts) */
+        0x92,                          /* LANG3 (Katakana) */
+        0x93,                          /* LANG4 (Hiragana) */
+        0x94,                          /* LANG5 (Zenkaku/Hankaku) */
+        0x95,                          /* LANG6 (Romaji/extra IME mode) */
     };
 
     for (uint16_t i = 0; i < (uint16_t)ARRAY_SIZE(usage_order); i++) {
