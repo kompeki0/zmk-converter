@@ -676,6 +676,37 @@ static bool extract_alnum_name(const struct net_buf_simple *ad, char *out, size_
     return ctx.found;
 }
 
+static char ascii_tolower_char(char c) {
+    if (c >= 'A' && c <= 'Z') {
+        return (char)(c - 'A' + 'a');
+    }
+    return c;
+}
+
+static bool ascii_contains_case_insensitive(const char *haystack, const char *needle) {
+    size_t i;
+    size_t j;
+
+    if (!haystack || !needle || needle[0] == '\0') {
+        return false;
+    }
+
+    for (i = 0; haystack[i] != '\0'; i++) {
+        for (j = 0; needle[j] != '\0'; j++) {
+            if (haystack[i + j] == '\0') {
+                return false;
+            }
+            if (ascii_tolower_char(haystack[i + j]) != ascii_tolower_char(needle[j])) {
+                break;
+            }
+        }
+        if (needle[j] == '\0') {
+            return true;
+        }
+    }
+    return false;
+}
+
 static int picker_find_index_by_addr(const bt_addr_le_t *addr) {
     for (uint8_t i = 0; i < picker_device_count; i++) {
         if (picker_devices[i].addr.type == addr->type &&
@@ -2097,6 +2128,8 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
                     struct net_buf_simple *ad) {
     char addr_str[BT_ADDR_LE_STR_LEN];
     char name[PICKER_NAME_MAX];
+    bool has_name = false;
+    bool auto_select_match = false;
 
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_SCAN_EVENTS)) {
         bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
@@ -2119,13 +2152,30 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
         return;
     }
 
+    has_name = extract_alnum_name(ad, name, sizeof(name)) && name[0] != '\0';
+
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_BUTTON_SELECTOR) && !selected_target_valid) {
-        if (extract_alnum_name(ad, name, sizeof(name)) && name[0] != '\0') {
+        if (has_name) {
+            auto_select_match = ascii_contains_case_insensitive(name, "hesper");
+            if (auto_select_match) {
+                bt_addr_le_copy(&target_addr, addr);
+                target_match_any_type = true;
+                target_any_addr = false;
+                selected_target_valid = true;
+                strncpy(target_name, name, sizeof(target_name) - 1U);
+                target_name[sizeof(target_name) - 1U] = '\0';
+                target_name_valid = (target_name[0] != '\0');
+                (void)save_persisted_target_addr(&target_addr);
+                (void)save_persisted_target_meta(target_sec_level_hint, target_name, target_name_valid);
+                LOG_INF("Auto-selected target by name match: %s", target_name);
+            }
             picker_add_or_update(addr, name, rssi);
         } else {
             picker_unknown_add_or_update(addr);
         }
-        return;
+        if (!auto_select_match) {
+            return;
+        }
     }
 
     if (!target_any_addr) {
@@ -2142,8 +2192,7 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
         if (!addr_match) {
             bool name_match = false;
 
-            if (target_name_valid && extract_alnum_name(ad, name, sizeof(name)) && name[0] != '\0' &&
-                strcmp(name, target_name) == 0) {
+            if (target_name_valid && has_name && strcmp(name, target_name) == 0) {
                 name_match = true;
             }
 
