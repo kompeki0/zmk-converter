@@ -393,11 +393,20 @@ static bool usage_exists(const uint8_t *usages, size_t count, uint8_t usage) {
     return false;
 }
 
+static bt_security_t cap_security_level_l2(bt_security_t level) {
+    if (level > BT_SECURITY_L2) {
+        return BT_SECURITY_L2;
+    }
+    return level;
+}
+
 static bt_security_t get_desired_security_level(void) {
-    bt_security_t configured = (bt_security_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_SECURITY_LEVEL;
+    bt_security_t configured =
+        cap_security_level_l2((bt_security_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_SECURITY_LEVEL);
 
     if (sec_policy_cycle_active) {
-        bt_security_t level = zmk_hogp_sniffer_sec_policy_level_for_idx(sec_policy_try_idx);
+        bt_security_t level = cap_security_level_l2(
+            zmk_hogp_sniffer_sec_policy_level_for_idx(sec_policy_try_idx));
         if (level < configured) {
             return configured;
         }
@@ -405,7 +414,7 @@ static bt_security_t get_desired_security_level(void) {
     }
 
     if (target_sec_hint_valid) {
-        bt_security_t hinted = (bt_security_t)target_sec_level_hint;
+        bt_security_t hinted = cap_security_level_l2((bt_security_t)target_sec_level_hint);
         if (hinted < configured) {
             return configured;
         }
@@ -419,7 +428,8 @@ static void step_security_policy_on_failure(int reason_code, const char *tag) {
     int64_t now = k_uptime_get();
     bt_security_t prev_level = get_desired_security_level();
     bt_security_t next_level;
-    bt_security_t configured = (bt_security_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_SECURITY_LEVEL;
+    bt_security_t configured =
+        cap_security_level_l2((bt_security_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_SECURITY_LEVEL);
     bool auth_requirement = false;
 
     /* Pairing callbacks and security_changed can report the same failure. */
@@ -443,13 +453,11 @@ static void step_security_policy_on_failure(int reason_code, const char *tag) {
         if (prev_level <= BT_SECURITY_L1) {
             sec_policy_try_idx = 1U; /* raise to L2 */
         } else {
-            sec_policy_try_idx = 0U; /* raise/keep at L3 */
+            sec_policy_try_idx = 1U; /* keep at L2 (L3 disabled) */
         }
     } else if (!sec_policy_cycle_active) {
         sec_policy_cycle_active = true;
-        if (prev_level >= BT_SECURITY_L3) {
-            sec_policy_try_idx = 1U; /* L3 failed -> try L2 */
-        } else if (prev_level == BT_SECURITY_L2) {
+        if (prev_level >= BT_SECURITY_L2) {
             sec_policy_try_idx = 2U; /* L2 failed -> try L1 */
         } else {
             sec_policy_try_idx = 2U; /* already low -> keep L1 */
@@ -462,9 +470,7 @@ static void step_security_policy_on_failure(int reason_code, const char *tag) {
 
     /* Never drop below configured minimum security level. */
     if (next_level < configured) {
-        if (configured >= BT_SECURITY_L3) {
-            sec_policy_try_idx = 0U; /* L3 */
-        } else if (configured == BT_SECURITY_L2) {
+        if (configured == BT_SECURITY_L2) {
             sec_policy_try_idx = 1U; /* L2 */
         } else {
             sec_policy_try_idx = 2U; /* L1 */
@@ -1889,8 +1895,8 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
         }
 #endif
 
-        if (auth_requirement && !security_upgrade_attempted && wanted_sec < BT_SECURITY_L3) {
-            bt_security_t next_sec = (wanted_sec == BT_SECURITY_L1) ? BT_SECURITY_L2 : BT_SECURITY_L3;
+        if (auth_requirement && !security_upgrade_attempted && wanted_sec < BT_SECURITY_L2) {
+            bt_security_t next_sec = BT_SECURITY_L2;
             security_upgrade_attempted = true;
             LOG_WRN("Security requires stronger level, retry in-place: L%u -> L%u",
                     (uint32_t)wanted_sec, (uint32_t)next_sec);
