@@ -418,6 +418,7 @@ static void step_security_policy_on_failure(int reason_code, const char *tag) {
     int64_t now = k_uptime_get();
     bt_security_t prev_level = get_desired_security_level();
     bt_security_t next_level;
+    bt_security_t configured = (bt_security_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_SECURITY_LEVEL;
     bool auth_requirement = false;
 
     /* Pairing callbacks and security_changed can report the same failure. */
@@ -457,6 +458,19 @@ static void step_security_policy_on_failure(int reason_code, const char *tag) {
     }
 
     next_level = get_desired_security_level();
+
+    /* Never drop below configured minimum security level. */
+    if (next_level < configured) {
+        if (configured >= BT_SECURITY_L3) {
+            sec_policy_try_idx = 0U; /* L3 */
+        } else if (configured == BT_SECURITY_L2) {
+            sec_policy_try_idx = 1U; /* L2 */
+        } else {
+            sec_policy_try_idx = 2U; /* L1 */
+        }
+        next_level = get_desired_security_level();
+    }
+
     next_connect_allowed_ms = now + (int64_t)(2500U * (uint32_t)(sec_policy_try_idx + 1U));
     LOG_WRN("%s: security policy L%u -> L%u (step %u/3), cooldown=%lldms", tag,
             (uint32_t)prev_level, (uint32_t)next_level, (uint32_t)(sec_policy_try_idx + 1U),
