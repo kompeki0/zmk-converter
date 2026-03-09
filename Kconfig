@@ -101,6 +101,23 @@ config ZMK_BLE_HOGP_SNIFFER_AUTH_AUTO_CONFIRM
       while connecting to the target device. Disable this to inspect the
       requested flow in logs without auto-confirming.
 
+config ZMK_BLE_HOGP_SNIFFER_PASSKEY_ENTRY_USE_FIXED
+    bool "Use fixed passkey when passkey entry is requested"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    depends on BT_SMP
+    default n
+    help
+      If enabled, respond to passkey-entry pairing requests with the fixed
+      passkey configured below. This is for debugging only.
+
+config ZMK_BLE_HOGP_SNIFFER_PASSKEY_ENTRY_FIXED
+    int "Fixed passkey value (0..999999)"
+    depends on ZMK_BLE_HOGP_SNIFFER_PASSKEY_ENTRY_USE_FIXED
+    range 0 999999
+    default 0
+    help
+      Six-digit passkey used when fixed passkey entry is enabled.
+
 config ZMK_BLE_HOGP_SNIFFER_SINGLE_TARGET_ONLY
     bool "After HID is verified, reconnect only to the single target"
     depends on ZMK_BLE_HOGP_SNIFFER

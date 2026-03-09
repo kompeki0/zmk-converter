@@ -1970,6 +1970,7 @@ static void pairing_failed_cb(struct bt_conn *conn, enum bt_security_err reason)
         screen_emit_usage_state, "pair fail", (uint8_t)reason,
         zmk_hogp_sniffer_sec_err_to_str(reason));
 #endif
+    schedule_security_disconnect(BT_HCI_ERR_REMOTE_USER_TERM_CONN, 50U);
 }
 
 #if defined(CONFIG_BT_SMP)
@@ -2001,9 +2002,23 @@ static void auth_passkey_display_cb(struct bt_conn *conn, unsigned int passkey) 
 
 static void auth_passkey_entry_cb(struct bt_conn *conn) {
     char addr[BT_ADDR_LE_STR_LEN];
+    int err;
 
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-    LOG_WRN("Passkey entry requested by %s (entry UI is not implemented in sniffer)", addr);
+    LOG_ERR("Passkey entry requested by %s", addr);
+
+    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_PASSKEY_ENTRY_USE_FIXED)) {
+        unsigned int passkey = (unsigned int)CONFIG_ZMK_BLE_HOGP_SNIFFER_PASSKEY_ENTRY_FIXED;
+        err = bt_conn_auth_passkey_entry(conn, passkey);
+        if (err && err != -EALREADY) {
+            LOG_WRN("bt_conn_auth_passkey_entry failed (%d)", err);
+            return;
+        }
+        LOG_WRN("Fixed passkey entry sent: %06u", passkey);
+        return;
+    }
+
+    LOG_ERR("No passkey input path implemented. Enable fixed passkey or add UI input path.");
 }
 
 static void auth_passkey_confirm_cb(struct bt_conn *conn, unsigned int passkey) {
