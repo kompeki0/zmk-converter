@@ -60,7 +60,10 @@
                 /* 127..131: wheel/pan pulses (up/down/left/right/reserved) */
                 &kp PG_UP &kp PG_DN &kp LEFT  &kp RIGHT &none
 
-                /* 132..140: JIS/IME keys */
+                /* 132..140: JIS/IME keys (host mapping may vary)
+                 * INT_KANA=かな, LANG2=英数(相当), LANG5=半角/全角(相当),
+                 * INT_HENKAN=変換, INT_MUHENKAN=無変換
+                 */
                 &kp INT_KANA &kp INT_HENKAN &kp INT_MUHENKAN
                 &kp LANG1    &kp LANG2      &kp LANG3
                 &kp LANG4    &kp LANG5      &kp LANG6
@@ -124,7 +127,7 @@
                 /* 127..131 */
                 &kp PG_UP &kp PG_DN &kp LEFT  &kp RIGHT &none
 
-                /* 132..140 */
+                /* 132..140: JIS/IME keys */
                 &kp INT_KANA &kp INT_HENKAN &kp INT_MUHENKAN
                 &kp LANG1    &kp LANG2      &kp LANG3
                 &kp LANG4    &kp LANG5      &kp LANG6

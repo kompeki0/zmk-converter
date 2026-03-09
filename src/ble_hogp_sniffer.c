@@ -30,6 +30,7 @@
 LOG_MODULE_REGISTER(ble_hogp_sniffer, CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_LEVEL);
 
 #define BOOT_KBD_REPORT_LEN 8
+#define POINTER_EXT_REPORT_LEN 9
 #define MAX_PRESSED_USAGES 14
 #define MAX_REPORT_SUBSCRIPTIONS 6
 #define MAX_SCAN_CANDIDATES 12
@@ -899,20 +900,102 @@ static void clear_all_bonds_cb(const struct bt_bond_info *info, void *user_data)
 static void process_boot_report(const uint8_t *report, size_t report_len) {
     uint8_t curr_usages[MAX_PRESSED_USAGES];
     size_t curr_usage_count = 0;
+    uint8_t next_pointer_buttons = prev_pointer_buttons;
+    bool pointer_buttons_changed = false;
 
     build_usage_set_from_boot_report(report, report_len, curr_usages, &curr_usage_count);
+
+    for (size_t i = 0; i < prev_usage_count; i++) {
+        if (!usage_exists(curr_usages, curr_usage_count, prev_usages[i])) {
+            uint8_t usage = prev_usages[i];
+            uint8_t mapped = 0U;
+
+            if ((uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN1 == usage) {
+                mapped = BIT(0);
+            } else if ((uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN2 == usage) {
+                mapped = BIT(1);
+            } else if ((uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN3 == usage) {
+                mapped = BIT(2);
+            } else if ((uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN4 == usage) {
+                mapped = BIT(3);
+            } else if ((uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN5 == usage) {
+                mapped = BIT(4);
+            }
+
+            if (mapped) {
+                next_pointer_buttons &= (uint8_t)~mapped;
+                pointer_buttons_changed = true;
+            }
+        }
+    }
+
+    for (size_t i = 0; i < curr_usage_count; i++) {
+        if (!usage_exists(prev_usages, prev_usage_count, curr_usages[i])) {
+            uint8_t usage = curr_usages[i];
+            uint8_t mapped = 0U;
+
+            if ((uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN1 == usage) {
+                mapped = BIT(0);
+            } else if ((uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN2 == usage) {
+                mapped = BIT(1);
+            } else if ((uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN3 == usage) {
+                mapped = BIT(2);
+            } else if ((uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN4 == usage) {
+                mapped = BIT(3);
+            } else if ((uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN5 == usage) {
+                mapped = BIT(4);
+            }
+
+            if (mapped) {
+                next_pointer_buttons |= mapped;
+                pointer_buttons_changed = true;
+            }
+        }
+    }
+
+    if (pointer_buttons_changed) {
+        if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_USE_INPUT_LISTENER)) {
+            int err = zmk_hogp_proxy_pointer_event_ex(0, 0, 0, 0, next_pointer_buttons);
+            if (err && IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_DEBUG_LOG)) {
+                LOG_WRN("kbd->pointer route failed (%d)", err);
+            }
+        } else {
+            for (uint8_t bit = 0; bit < POINTER_BUTTON_SLOT_COUNT; bit++) {
+                bool prev = (prev_pointer_buttons & BIT(bit)) != 0U;
+                bool curr = (next_pointer_buttons & BIT(bit)) != 0U;
+                if (prev != curr) {
+                    (void)zmk_hogp_proxy_kscan_inject(0, (uint16_t)(POINTER_SLOT_BASE + bit), curr);
+                }
+            }
+        }
+        prev_pointer_buttons = next_pointer_buttons;
+    }
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS) &&
         !IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_EMIT_POSITION_EVENTS)) {
         for (size_t i = 0; i < prev_usage_count; i++) {
             if (!usage_exists(curr_usages, curr_usage_count, prev_usages[i])) {
+                if (prev_usages[i] == (uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN1 ||
+                    prev_usages[i] == (uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN2 ||
+                    prev_usages[i] == (uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN3 ||
+                    prev_usages[i] == (uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN4 ||
+                    prev_usages[i] == (uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN5) {
+                    continue;
+                }
                 emit_usage_state(prev_usages[i], false);
             }
         }
 
         for (size_t i = 0; i < curr_usage_count; i++) {
             if (!usage_exists(prev_usages, prev_usage_count, curr_usages[i])) {
+                if (curr_usages[i] == (uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN1 ||
+                    curr_usages[i] == (uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN2 ||
+                    curr_usages[i] == (uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN3 ||
+                    curr_usages[i] == (uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN4 ||
+                    curr_usages[i] == (uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN5) {
+                    continue;
+                }
                 emit_usage_state(curr_usages[i], true);
             }
         }
@@ -923,6 +1006,13 @@ static void process_boot_report(const uint8_t *report, size_t report_len) {
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_EMIT_POSITION_EVENTS)) {
         for (size_t i = 0; i < prev_usage_count; i++) {
             if (!usage_exists(curr_usages, curr_usage_count, prev_usages[i])) {
+                if (prev_usages[i] == (uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN1 ||
+                    prev_usages[i] == (uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN2 ||
+                    prev_usages[i] == (uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN3 ||
+                    prev_usages[i] == (uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN4 ||
+                    prev_usages[i] == (uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN5) {
+                    continue;
+                }
                 uint16_t row, col;
                 if (usage_to_row_col(prev_usages[i], &row, &col)) {
                     (void)zmk_hogp_proxy_kscan_inject(row, col, false);
@@ -932,6 +1022,13 @@ static void process_boot_report(const uint8_t *report, size_t report_len) {
 
         for (size_t i = 0; i < curr_usage_count; i++) {
             if (!usage_exists(prev_usages, prev_usage_count, curr_usages[i])) {
+                if (curr_usages[i] == (uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN1 ||
+                    curr_usages[i] == (uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN2 ||
+                    curr_usages[i] == (uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN3 ||
+                    curr_usages[i] == (uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN4 ||
+                    curr_usages[i] == (uint8_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN5) {
+                    continue;
+                }
                 uint16_t row, col;
                 if (usage_to_row_col(curr_usages[i], &row, &col)) {
                     (void)zmk_hogp_proxy_kscan_inject(row, col, true);
@@ -1097,7 +1194,7 @@ static void handle_input_report_bytes(const uint8_t *data, uint16_t length) {
     }
 
     /* Some devices prepend Report ID. If len is not recognized, try stripping 1 byte. */
-    if (len != BOOT_KBD_REPORT_LEN && len != 12U && len > 1U) {
+    if (len != BOOT_KBD_REPORT_LEN && len != 12U && len != POINTER_EXT_REPORT_LEN && len > 1U) {
         uint8_t rid = p[0];
         if (rid >= 1U && rid <= 32U) {
             p++;
@@ -1110,7 +1207,8 @@ static void handle_input_report_bytes(const uint8_t *data, uint16_t length) {
         process_boot_report(p, len);
     } else if (len == 12U) {
         process_nkro12_report(p, len);
-    } else if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_ENABLE_POINTER_REPORTS) && len == 9U) {
+    } else if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_ENABLE_POINTER_REPORTS) &&
+               len == POINTER_EXT_REPORT_LEN) {
         process_pointer_9byte_report(p, len);
     } else if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_ENABLE_POINTER_REPORTS) &&
                (len == 3U || len == 4U)) {

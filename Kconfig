@@ -143,6 +143,31 @@ config ZMK_BLE_HOGP_SNIFFER_POINTER_DEBUG_LOG
       Print parsed pointer data and input-report forwarding status to
       the serial console for debugging.
 
+config ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN1
+    hex "Keyboard usage remapped to mouse button 1 (0=disabled)"
+    depends on ZMK_BLE_HOGP_SNIFFER_ENABLE_POINTER_REPORTS
+    default 0x00
+
+config ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN2
+    hex "Keyboard usage remapped to mouse button 2 (0=disabled)"
+    depends on ZMK_BLE_HOGP_SNIFFER_ENABLE_POINTER_REPORTS
+    default 0x00
+
+config ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN3
+    hex "Keyboard usage remapped to mouse button 3 (0=disabled)"
+    depends on ZMK_BLE_HOGP_SNIFFER_ENABLE_POINTER_REPORTS
+    default 0x00
+
+config ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN4
+    hex "Keyboard usage remapped to mouse button 4 (0=disabled)"
+    depends on ZMK_BLE_HOGP_SNIFFER_ENABLE_POINTER_REPORTS
+    default 0x00
+
+config ZMK_BLE_HOGP_SNIFFER_KEY_USAGE_MOUSE_BTN5
+    hex "Keyboard usage remapped to mouse button 5 (0=disabled)"
+    depends on ZMK_BLE_HOGP_SNIFFER_ENABLE_POINTER_REPORTS
+    default 0x00
+
 config ZMK_BLE_HOGP_SNIFFER_POINTER_STEP_DIV
     int "Pointer delta-to-pulse divisor"
     depends on ZMK_BLE_HOGP_SNIFFER_ENABLE_POINTER_REPORTS
