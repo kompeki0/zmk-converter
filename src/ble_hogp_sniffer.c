@@ -2008,7 +2008,10 @@ static void auth_passkey_entry_cb(struct bt_conn *conn) {
     LOG_ERR("Passkey entry requested by %s", addr);
 
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_PASSKEY_ENTRY_USE_FIXED)) {
-        unsigned int passkey = (unsigned int)CONFIG_ZMK_BLE_HOGP_SNIFFER_PASSKEY_ENTRY_FIXED;
+        unsigned int passkey = 0U;
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_PASSKEY_ENTRY_FIXED)
+        passkey = (unsigned int)CONFIG_ZMK_BLE_HOGP_SNIFFER_PASSKEY_ENTRY_FIXED;
+#endif
         err = bt_conn_auth_passkey_entry(conn, passkey);
         if (err && err != -EALREADY) {
             LOG_WRN("bt_conn_auth_passkey_entry failed (%d)", err);
