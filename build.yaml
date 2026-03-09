@@ -50,6 +50,9 @@ include:
       -DCONFIG_SERIAL=y
       -DCONFIG_CONSOLE=y
       -DCONFIG_UART_CONSOLE=y
+      -DCONFIG_BT_SMP=y
+      -DCONFIG_BT_BONDABLE=y
+      -DCONFIG_BT_DEBUG_LOG=y
       -DCONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_DEBUG_LOG=y
 
   - board: seeeduino_xiao_ble

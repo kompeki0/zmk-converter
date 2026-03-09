@@ -123,6 +123,18 @@ const char *zmk_hogp_sniffer_sec_err_to_str(enum bt_security_err err) {
         if ((int)err == 5) {
             return "pair_not_supported";
         }
+        if ((int)err == 6) {
+            return "confirm_value_failed";
+        }
+        if ((int)err == 8) {
+            return "pairing_in_progress";
+        }
+        if ((int)err == 9) {
+            return "unspecified";
+        }
+        if ((int)err == 14) {
+            return "cross_transport_not_allowed";
+        }
         return "unknown";
     }
 }
