@@ -37,6 +37,14 @@ LOG_MODULE_REGISTER(ble_hogp_sniffer, CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_LEVEL);
 #define PICKER_NAME_MAX 20
 #define CONSUMER_SLOT_BASE 104
 #define CONSUMER_SLOT_COUNT 10
+#define POINTER_SLOT_BASE 118
+#define POINTER_BUTTON_SLOT_COUNT 5
+#define POINTER_AXIS_LEFT_SLOT 123
+#define POINTER_AXIS_RIGHT_SLOT 124
+#define POINTER_AXIS_UP_SLOT 125
+#define POINTER_AXIS_DOWN_SLOT 126
+#define POINTER_WHEEL_UP_SLOT 127
+#define POINTER_WHEEL_DOWN_SLOT 128
 #define TARGET_NAME_MAX PICKER_NAME_MAX
 
 static struct bt_conn *default_conn;
@@ -123,6 +131,7 @@ static uint8_t prev_usages[MAX_PRESSED_USAGES];
 static size_t prev_usage_count;
 static uint8_t prev_consumer_slots[CONSUMER_SLOT_COUNT];
 static size_t prev_consumer_slot_count;
+static uint8_t prev_pointer_buttons;
 
 struct persisted_target_addr {
     uint8_t type;
@@ -180,6 +189,14 @@ static void screen_emit_usage_state(uint8_t usage, bool pressed);
 #endif
 
 int zmk_hogp_proxy_kscan_inject(uint16_t row, uint16_t col, bool pressed);
+__attribute__((weak)) int zmk_hogp_proxy_pointer_event(int16_t dx, int16_t dy, int8_t wheel,
+                                                       uint8_t buttons) {
+    ARG_UNUSED(dx);
+    ARG_UNUSED(dy);
+    ARG_UNUSED(wheel);
+    ARG_UNUSED(buttons);
+    return -ENOTSUP;
+}
 
 static void clear_default_conn_ref(void) {
     if (default_conn) {
@@ -929,6 +946,70 @@ static void process_nkro12_report(const uint8_t *report, size_t report_len) {
     memcpy(prev_consumer_slots, curr_slots, curr_slot_count);
 }
 
+static void inject_pointer_pulse(uint16_t col) {
+    (void)zmk_hogp_proxy_kscan_inject(0, col, true);
+    (void)zmk_hogp_proxy_kscan_inject(0, col, false);
+}
+
+static void emit_pointer_axis_pulses(int8_t delta, uint16_t negative_slot, uint16_t positive_slot) {
+    int16_t abs_delta;
+    uint8_t pulses;
+    uint16_t slot;
+
+    if (delta == 0) {
+        return;
+    }
+
+    abs_delta = delta < 0 ? (int16_t)(-delta) : (int16_t)delta;
+    pulses = (uint8_t)(abs_delta / CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_STEP_DIV);
+    if (pulses == 0U) {
+        pulses = 1U;
+    }
+    if (pulses > CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_MAX_PULSES) {
+        pulses = CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_MAX_PULSES;
+    }
+
+    slot = delta < 0 ? negative_slot : positive_slot;
+    for (uint8_t i = 0; i < pulses; i++) {
+        inject_pointer_pulse(slot);
+    }
+}
+
+static void process_mouse_report(const uint8_t *report, size_t report_len) {
+    uint8_t buttons;
+    int8_t x;
+    int8_t y;
+    int8_t wheel;
+
+    if (report_len < 3U) {
+        return;
+    }
+
+    buttons = report[0];
+    x = (int8_t)report[1];
+    y = (int8_t)report[2];
+    wheel = (report_len >= 4U) ? (int8_t)report[3] : 0;
+
+    if (zmk_hogp_proxy_pointer_event((int16_t)x, (int16_t)y, wheel, buttons) == 0) {
+        prev_pointer_buttons = buttons;
+        return;
+    }
+
+    for (uint8_t bit = 0; bit < POINTER_BUTTON_SLOT_COUNT; bit++) {
+        bool prev = (prev_pointer_buttons & BIT(bit)) != 0U;
+        bool curr = (buttons & BIT(bit)) != 0U;
+        if (prev != curr) {
+            (void)zmk_hogp_proxy_kscan_inject(0, (uint16_t)(POINTER_SLOT_BASE + bit), curr);
+        }
+    }
+    prev_pointer_buttons = buttons;
+
+    emit_pointer_axis_pulses(x, POINTER_AXIS_LEFT_SLOT, POINTER_AXIS_RIGHT_SLOT);
+    /* HID mouse Y is positive when moving down. */
+    emit_pointer_axis_pulses(y, POINTER_AXIS_UP_SLOT, POINTER_AXIS_DOWN_SLOT);
+    emit_pointer_axis_pulses(wheel, POINTER_WHEEL_DOWN_SLOT, POINTER_WHEEL_UP_SLOT);
+}
+
 static void handle_input_report_bytes(const uint8_t *data, uint16_t length) {
     const uint8_t *p = data;
     uint16_t len = length;
@@ -951,6 +1032,9 @@ static void handle_input_report_bytes(const uint8_t *data, uint16_t length) {
         process_boot_report(p, len);
     } else if (len == 12U) {
         process_nkro12_report(p, len);
+    } else if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_ENABLE_POINTER_REPORTS) &&
+               (len == 3U || len == 4U)) {
+        process_mouse_report(p, len);
     } else {
         LOG_DBG("Unsupported report format for key mapper (len=%u)", len);
     }
@@ -1371,6 +1455,7 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
     pending_report_value_handle = 0;
     prev_consumer_slot_count = 0;
     memset(prev_consumer_slots, 0, sizeof(prev_consumer_slots));
+    prev_pointer_buttons = 0;
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)) {

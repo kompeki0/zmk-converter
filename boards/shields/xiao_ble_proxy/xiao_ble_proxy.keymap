@@ -50,6 +50,15 @@
 
                 /* 114..117: external tact switches on pins 0..3 */
                 &kp A &kp B &kp C &kp D
+
+                /* 118..122: pointer buttons (L/R/M/B4/B5) */
+                &none &none &none &none &none
+
+                /* 123..126: pointer move pulses (left/right/up/down) */
+                &kp LEFT  &kp RIGHT &kp UP    &kp DOWN
+
+                /* 127..131: wheel/pan pulses (up/down/left/right/reserved) */
+                &kp PG_UP &kp PG_DN &kp LEFT  &kp RIGHT &none
             >;
         };
 
@@ -100,6 +109,15 @@
 
                 /* 114..117 */
                 &kp F13 &kp F14 &kp F15 &kp F16
+
+                /* 118..122 */
+                &none &none &none &none &none
+
+                /* 123..126 */
+                &kp LEFT  &kp RIGHT &kp UP    &kp DOWN
+
+                /* 127..131 */
+                &kp PG_UP &kp PG_DN &kp LEFT  &kp RIGHT &none
             >;
         };
     };

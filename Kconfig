@@ -116,6 +116,33 @@ config ZMK_BLE_HOGP_SNIFFER_EMIT_POSITION_EVENTS
       Convert incoming HID keyboard usages into virtual matrix row/col events
       so they flow through the normal ZMK keymap/behavior pipeline.
 
+config ZMK_BLE_HOGP_SNIFFER_ENABLE_POINTER_REPORTS
+    bool "Parse mouse/pointer input reports into virtual kscan events"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    default y
+    help
+      Handle 3-byte (buttons+x+y) and 4-byte (+wheel) HID mouse reports.
+      Pointer buttons are exposed as holdable virtual positions and
+      x/y/wheel deltas are converted into tap pulses.
+
+config ZMK_BLE_HOGP_SNIFFER_POINTER_STEP_DIV
+    int "Pointer delta-to-pulse divisor"
+    depends on ZMK_BLE_HOGP_SNIFFER_ENABLE_POINTER_REPORTS
+    range 1 64
+    default 8
+    help
+      Larger values reduce pulse count for large deltas.
+      pulses = max(1, abs(delta) / divisor), capped by MAX_PULSES.
+
+config ZMK_BLE_HOGP_SNIFFER_POINTER_MAX_PULSES
+    int "Maximum pulses generated per pointer axis update"
+    depends on ZMK_BLE_HOGP_SNIFFER_ENABLE_POINTER_REPORTS
+    range 1 32
+    default 4
+    help
+      Upper bound for generated x/y/wheel pulses per input report.
+      Keeps event bursts bounded to avoid queue overflow.
+
 config ZMK_BLE_HOGP_SNIFFER_CLEAR_NON_TARGET_BONDS_ON_START
     bool "Clear all BLE bonds except target keyboard on boot"
     depends on ZMK_BLE_HOGP_SNIFFER
