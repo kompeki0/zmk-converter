@@ -45,6 +45,8 @@ LOG_MODULE_REGISTER(ble_hogp_sniffer, CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_LEVEL);
 #define POINTER_AXIS_DOWN_SLOT 126
 #define POINTER_WHEEL_UP_SLOT 127
 #define POINTER_WHEEL_DOWN_SLOT 128
+#define POINTER_HWHEEL_LEFT_SLOT 129
+#define POINTER_HWHEEL_RIGHT_SLOT 130
 #define TARGET_NAME_MAX PICKER_NAME_MAX
 
 static struct bt_conn *default_conn;
@@ -193,6 +195,15 @@ __attribute__((weak)) int zmk_hogp_proxy_pointer_event(int16_t dx, int16_t dy, i
                                                        uint8_t buttons) {
     ARG_UNUSED(dx);
     ARG_UNUSED(dy);
+    ARG_UNUSED(wheel);
+    ARG_UNUSED(buttons);
+    return -ENOTSUP;
+}
+__attribute__((weak)) int zmk_hogp_proxy_pointer_event_ex(int16_t dx, int16_t dy, int16_t hwheel,
+                                                          int16_t wheel, uint8_t buttons) {
+    ARG_UNUSED(dx);
+    ARG_UNUSED(dy);
+    ARG_UNUSED(hwheel);
     ARG_UNUSED(wheel);
     ARG_UNUSED(buttons);
     return -ENOTSUP;
@@ -1002,7 +1013,10 @@ static void process_mouse_report(const uint8_t *report, size_t report_len) {
     wheel = (report_len >= 4U) ? (int8_t)report[3] : 0;
 
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_USE_INPUT_LISTENER)) {
-        int err = zmk_hogp_proxy_pointer_event((int16_t)x, (int16_t)y, wheel, buttons);
+        int err = zmk_hogp_proxy_pointer_event_ex((int16_t)x, (int16_t)y, 0, (int16_t)wheel, buttons);
+        if (err == -ENOTSUP) {
+            err = zmk_hogp_proxy_pointer_event((int16_t)x, (int16_t)y, wheel, buttons);
+        }
         if (err == 0) {
             prev_pointer_buttons = buttons;
         } else if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_DEBUG_LOG)) {
@@ -1031,6 +1045,49 @@ static void process_mouse_report(const uint8_t *report, size_t report_len) {
     emit_pointer_axis_pulses(wheel, POINTER_WHEEL_DOWN_SLOT, POINTER_WHEEL_UP_SLOT);
 }
 
+static void process_pointer_9byte_report(const uint8_t *report, size_t report_len) {
+    uint8_t buttons;
+    int16_t dx;
+    int16_t dy;
+    int16_t wheel;
+    int16_t hwheel;
+
+    if (report_len != 9U) {
+        return;
+    }
+
+    buttons = report[0];
+    dx = (int16_t)sys_get_le16(&report[1]);
+    dy = (int16_t)sys_get_le16(&report[3]);
+    wheel = (int16_t)sys_get_le16(&report[5]);
+    hwheel = (int16_t)sys_get_le16(&report[7]);
+
+    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_USE_INPUT_LISTENER)) {
+        int err = zmk_hogp_proxy_pointer_event_ex(dx, dy, hwheel, wheel, buttons);
+        if (err == 0) {
+            prev_pointer_buttons = buttons;
+        } else if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_DEBUG_LOG)) {
+            LOG_WRN("pointer listener route failed (%d)", err);
+        }
+        return;
+    }
+
+    for (uint8_t bit = 0; bit < POINTER_BUTTON_SLOT_COUNT; bit++) {
+        bool prev = (prev_pointer_buttons & BIT(bit)) != 0U;
+        bool curr = (buttons & BIT(bit)) != 0U;
+        if (prev != curr) {
+            (void)zmk_hogp_proxy_kscan_inject(0, (uint16_t)(POINTER_SLOT_BASE + bit), curr);
+        }
+    }
+    prev_pointer_buttons = buttons;
+
+    emit_pointer_axis_pulses((int8_t)CLAMP(dx, -127, 127), POINTER_AXIS_LEFT_SLOT, POINTER_AXIS_RIGHT_SLOT);
+    emit_pointer_axis_pulses((int8_t)CLAMP(dy, -127, 127), POINTER_AXIS_UP_SLOT, POINTER_AXIS_DOWN_SLOT);
+    emit_pointer_axis_pulses((int8_t)CLAMP(wheel, -127, 127), POINTER_WHEEL_DOWN_SLOT, POINTER_WHEEL_UP_SLOT);
+    emit_pointer_axis_pulses((int8_t)CLAMP(hwheel, -127, 127), POINTER_HWHEEL_LEFT_SLOT,
+                             POINTER_HWHEEL_RIGHT_SLOT);
+}
+
 static void handle_input_report_bytes(const uint8_t *data, uint16_t length) {
     const uint8_t *p = data;
     uint16_t len = length;
@@ -1053,6 +1110,8 @@ static void handle_input_report_bytes(const uint8_t *data, uint16_t length) {
         process_boot_report(p, len);
     } else if (len == 12U) {
         process_nkro12_report(p, len);
+    } else if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_ENABLE_POINTER_REPORTS) && len == 9U) {
+        process_pointer_9byte_report(p, len);
     } else if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_ENABLE_POINTER_REPORTS) &&
                (len == 3U || len == 4U)) {
         process_mouse_report(p, len);

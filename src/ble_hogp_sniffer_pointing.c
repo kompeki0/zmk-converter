@@ -11,6 +11,9 @@ LOG_MODULE_DECLARE(ble_hogp_sniffer, CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_LEVEL);
 
 #define HOGP_POINTER_INPUT_DEVICE DT_NODELABEL(hogp_kscan)
 
+int zmk_hogp_proxy_pointer_event_ex(int16_t dx, int16_t dy, int16_t hwheel, int16_t wheel,
+                                    uint8_t buttons);
+
 static int report_input_event(const struct device *dev, uint8_t type, uint16_t code, int32_t value,
                               bool sync) {
     int err = input_report(dev, type, code, value, sync, K_NO_WAIT);
@@ -24,6 +27,11 @@ static int report_input_event(const struct device *dev, uint8_t type, uint16_t c
 }
 
 int zmk_hogp_proxy_pointer_event(int16_t dx, int16_t dy, int8_t wheel, uint8_t buttons) {
+    return zmk_hogp_proxy_pointer_event_ex(dx, dy, 0, wheel, buttons);
+}
+
+int zmk_hogp_proxy_pointer_event_ex(int16_t dx, int16_t dy, int16_t hwheel, int16_t wheel,
+                                    uint8_t buttons) {
     static uint8_t prev_buttons;
     static bool ready_checked;
     static bool ready;
@@ -45,7 +53,8 @@ int zmk_hogp_proxy_pointer_event(int16_t dx, int16_t dy, int8_t wheel, uint8_t b
     }
 
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_DEBUG_LOG)) {
-        LOG_INF("pointer in dx=%d dy=%d wheel=%d btn=0x%02x", dx, dy, wheel, buttons);
+        LOG_INF("pointer in dx=%d dy=%d wheel=%d hwheel=%d btn=0x%02x", dx, dy, wheel, hwheel,
+                buttons);
     }
 
     if (dx != 0) {
@@ -55,6 +64,9 @@ int zmk_hogp_proxy_pointer_event(int16_t dx, int16_t dy, int8_t wheel, uint8_t b
         total_events++;
     }
     if (wheel != 0) {
+        total_events++;
+    }
+    if (hwheel != 0) {
         total_events++;
     }
     for (uint8_t bit = 0U; bit < 5U; bit++) {
@@ -83,6 +95,11 @@ int zmk_hogp_proxy_pointer_event(int16_t dx, int16_t dy, int8_t wheel, uint8_t b
     if (wheel != 0) {
         sent_events++;
         (void)report_input_event(dev, INPUT_EV_REL, INPUT_REL_WHEEL, wheel,
+                                 sent_events == total_events);
+    }
+    if (hwheel != 0) {
+        sent_events++;
+        (void)report_input_event(dev, INPUT_EV_REL, INPUT_REL_HWHEEL, hwheel,
                                  sent_events == total_events);
     }
 
