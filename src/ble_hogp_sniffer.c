@@ -393,15 +393,25 @@ static bool usage_exists(const uint8_t *usages, size_t count, uint8_t usage) {
 }
 
 static bt_security_t get_desired_security_level(void) {
+    bt_security_t configured = (bt_security_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_SECURITY_LEVEL;
+
     if (sec_policy_cycle_active) {
-        return zmk_hogp_sniffer_sec_policy_level_for_idx(sec_policy_try_idx);
+        bt_security_t level = zmk_hogp_sniffer_sec_policy_level_for_idx(sec_policy_try_idx);
+        if (level < configured) {
+            return configured;
+        }
+        return level;
     }
 
     if (target_sec_hint_valid) {
-        return (bt_security_t)target_sec_level_hint;
+        bt_security_t hinted = (bt_security_t)target_sec_level_hint;
+        if (hinted < configured) {
+            return configured;
+        }
+        return hinted;
     }
 
-    return (bt_security_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_SECURITY_LEVEL;
+    return configured;
 }
 
 static void step_security_policy_on_failure(int reason_code, const char *tag) {
