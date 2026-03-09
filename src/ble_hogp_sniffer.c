@@ -1703,7 +1703,18 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     }
 
     if (derr == 0) {
-        /* Wait for security_changed callback, then start discovery. */
+        /* L1 links may not emit security_changed; start discovery immediately. */
+        if (wanted_sec <= BT_SECURITY_L1) {
+            LOG_INF("Security L1 accepted; start HID discovery without waiting callback");
+            gatt_discovery_started = true;
+            derr = discover_hids(conn);
+            if (derr) {
+                LOG_ERR("HID discovery start failed (%d)", derr);
+            }
+            return;
+        }
+
+        /* For L2+, wait for security_changed callback, then start discovery. */
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
         zmk_hogp_sniffer_screen_log_verbose_text(screen_emit_usage_state, "wait sec");
 #endif
