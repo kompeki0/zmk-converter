@@ -1,5 +1,6 @@
 #include <dt-bindings/zmk/matrix_transform.h>
 #include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
 
 / {
     hogp_kscan: hogp_kscan {
@@ -42,6 +43,19 @@
         display-name = "Default Layout";
         kscan = <&hogp_kscan>;
         transform = <&default_transform>;
+    };
+
+    hogp_pointer_scaler: hogp_pointer_scaler {
+        compatible = "zmk,input-processor-scaler";
+        #input-processor-cells = <2>;
+        type = <INPUT_EV_REL>;
+        codes = <INPUT_REL_X INPUT_REL_Y INPUT_REL_WHEEL>;
+    };
+
+    hogp_pointer_listener: hogp_pointer_listener {
+        compatible = "zmk,input-listener";
+        device = <&hogp_kscan>;
+        input-processors = <&hogp_pointer_scaler 1 1>;
     };
 
     chosen {

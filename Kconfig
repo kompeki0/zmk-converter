@@ -125,6 +125,24 @@ config ZMK_BLE_HOGP_SNIFFER_ENABLE_POINTER_REPORTS
       Pointer buttons are exposed as holdable virtual positions and
       x/y/wheel deltas are converted into tap pulses.
 
+config ZMK_BLE_HOGP_SNIFFER_POINTER_USE_INPUT_LISTENER
+    bool "Route pointer reports to ZMK input-listener/input-processor"
+    depends on ZMK_BLE_HOGP_SNIFFER_ENABLE_POINTER_REPORTS
+    depends on ZMK_POINTING
+    default y
+    help
+      Forward parsed HID mouse data as Zephyr input events so ZMK's
+      input-listener pipeline can emit real mouse HID reports.
+      If disabled, the virtual key pulse fallback is used.
+
+config ZMK_BLE_HOGP_SNIFFER_POINTER_DEBUG_LOG
+    bool "Verbose pointer event logs"
+    depends on ZMK_BLE_HOGP_SNIFFER_ENABLE_POINTER_REPORTS
+    default n
+    help
+      Print parsed pointer data and input-report forwarding status to
+      the serial console for debugging.
+
 config ZMK_BLE_HOGP_SNIFFER_POINTER_STEP_DIV
     int "Pointer delta-to-pulse divisor"
     depends on ZMK_BLE_HOGP_SNIFFER_ENABLE_POINTER_REPORTS

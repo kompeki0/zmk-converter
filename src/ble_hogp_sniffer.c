@@ -990,6 +990,16 @@ static void process_mouse_report(const uint8_t *report, size_t report_len) {
     y = (int8_t)report[2];
     wheel = (report_len >= 4U) ? (int8_t)report[3] : 0;
 
+    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_USE_INPUT_LISTENER)) {
+        int err = zmk_hogp_proxy_pointer_event((int16_t)x, (int16_t)y, wheel, buttons);
+        if (err == 0) {
+            prev_pointer_buttons = buttons;
+        } else if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_DEBUG_LOG)) {
+            LOG_WRN("pointer listener route failed (%d)", err);
+        }
+        return;
+    }
+
     if (zmk_hogp_proxy_pointer_event((int16_t)x, (int16_t)y, wheel, buttons) == 0) {
         prev_pointer_buttons = buttons;
         return;
