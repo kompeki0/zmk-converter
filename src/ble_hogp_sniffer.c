@@ -408,6 +408,7 @@ static void step_security_policy_on_failure(int reason_code, const char *tag) {
     int64_t now = k_uptime_get();
     bt_security_t prev_level = get_desired_security_level();
     bt_security_t next_level;
+    bool auth_requirement = false;
 
     /* Pairing callbacks and security_changed can report the same failure. */
     if ((now - last_sec_policy_step_ms) < 500) {
@@ -415,7 +416,24 @@ static void step_security_policy_on_failure(int reason_code, const char *tag) {
     }
     last_sec_policy_step_ms = now;
 
-    if (!sec_policy_cycle_active) {
+    if (reason_code == 4) {
+        auth_requirement = true;
+    }
+#ifdef BT_SECURITY_ERR_AUTH_REQUIREMENT
+    if (reason_code == (int)BT_SECURITY_ERR_AUTH_REQUIREMENT) {
+        auth_requirement = true;
+    }
+#endif
+
+    /* Some targets reject L1 and require encrypted/authenticated links. */
+    if (auth_requirement) {
+        sec_policy_cycle_active = true;
+        if (prev_level <= BT_SECURITY_L1) {
+            sec_policy_try_idx = 1U; /* raise to L2 */
+        } else {
+            sec_policy_try_idx = 0U; /* raise/keep at L3 */
+        }
+    } else if (!sec_policy_cycle_active) {
         sec_policy_cycle_active = true;
         if (prev_level >= BT_SECURITY_L3) {
             sec_policy_try_idx = 1U; /* L3 failed -> try L2 */
@@ -1690,6 +1708,16 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
         LOG_INF("Requested stable conn params (30-50ms, lat=0, timeout=20s)");
     }
 
+    if (wanted_sec <= BT_SECURITY_L1) {
+        LOG_INF("Security L1 path: start HID discovery directly");
+        gatt_discovery_started = true;
+        derr = discover_hids(conn);
+        if (derr) {
+            LOG_ERR("HID discovery start failed (%d)", derr);
+        }
+        return;
+    }
+
     LOG_INF("Requesting security L%u", (uint32_t)wanted_sec);
     derr = bt_conn_set_security(conn, wanted_sec);
     if (derr == -EALREADY) {
@@ -1703,17 +1731,6 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     }
 
     if (derr == 0) {
-        /* L1 links may not emit security_changed; start discovery immediately. */
-        if (wanted_sec <= BT_SECURITY_L1) {
-            LOG_INF("Security L1 accepted; start HID discovery without waiting callback");
-            gatt_discovery_started = true;
-            derr = discover_hids(conn);
-            if (derr) {
-                LOG_ERR("HID discovery start failed (%d)", derr);
-            }
-            return;
-        }
-
         /* For L2+, wait for security_changed callback, then start discovery. */
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
         zmk_hogp_sniffer_screen_log_verbose_text(screen_emit_usage_state, "wait sec");
