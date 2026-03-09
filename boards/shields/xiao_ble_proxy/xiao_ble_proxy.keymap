@@ -61,12 +61,18 @@
                 &kp PG_UP &kp PG_DN &kp LEFT  &kp RIGHT &none
 
                 /* 132..140: JIS/IME keys (host mapping may vary)
-                 * INT_KANA=かな, LANG2=英数(相当), LANG5=半角/全角(相当),
-                 * INT_HENKAN=変換, INT_MUHENKAN=無変換
+                 * INT_KANA=Kana, LANG2=Eisu-like, LANG5=Zenkaku/Hankaku-like,
+                 * INT_HENKAN=Henkan, INT_MUHENKAN=Muhenkan
                  */
                 &kp INT_KANA &kp INT_HENKAN &kp INT_MUHENKAN
                 &kp LANG1    &kp LANG2      &kp LANG3
                 &kp LANG4    &kp LANG5      &kp LANG6
+
+                /* 141..152: extra consumer usages */
+                &kp C_AC_BACK    &kp C_AC_FORWARD &kp C_AC_REFRESH &kp C_AC_STOP
+                &kp C_AC_HOME    &kp C_AC_SEARCH  &kp C_AC_BOOKMARKS
+                &kp C_AL_WWW     &kp C_AL_MAIL    &kp C_AL_CALC
+                &kp C_AC_ZOOM_IN &kp C_AC_ZOOM_OUT
             >;
         };
 
@@ -131,6 +137,12 @@
                 &kp INT_KANA &kp INT_HENKAN &kp INT_MUHENKAN
                 &kp LANG1    &kp LANG2      &kp LANG3
                 &kp LANG4    &kp LANG5      &kp LANG6
+
+                /* 141..152: extra consumer usages */
+                &kp C_AC_BACK    &kp C_AC_FORWARD &kp C_AC_REFRESH &kp C_AC_STOP
+                &kp C_AC_HOME    &kp C_AC_SEARCH  &kp C_AC_BOOKMARKS
+                &kp C_AL_WWW     &kp C_AL_MAIL    &kp C_AL_CALC
+                &kp C_AC_ZOOM_IN &kp C_AC_ZOOM_OUT
             >;
         };
     };

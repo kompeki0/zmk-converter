@@ -37,7 +37,7 @@ LOG_MODULE_REGISTER(ble_hogp_sniffer, CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_LEVEL);
 #define MAX_PICKER_DEVICES 16
 #define PICKER_NAME_MAX 20
 #define CONSUMER_SLOT_BASE 104
-#define CONSUMER_SLOT_COUNT 10
+#define CONSUMER_SLOT_COUNT 49
 #define POINTER_SLOT_BASE 118
 #define POINTER_BUTTON_SLOT_COUNT 5
 #define POINTER_AXIS_LEFT_SLOT 123
@@ -135,6 +135,7 @@ static size_t prev_usage_count;
 static uint8_t prev_consumer_slots[CONSUMER_SLOT_COUNT];
 static size_t prev_consumer_slot_count;
 static uint8_t prev_pointer_buttons;
+static uint8_t report_format_hint[MAX_REPORT_SUBSCRIPTIONS];
 
 struct persisted_target_addr {
     uint8_t type;
@@ -481,6 +482,30 @@ static int consumer_usage_to_slot(uint16_t usage) {
         return 8;
     case 0x00F8: /* Mic Mute (commonly used by PC keyboards) */
         return 9;
+    case 0x0224: /* AC Back */
+        return 37;
+    case 0x0225: /* AC Forward */
+        return 38;
+    case 0x0227: /* AC Refresh */
+        return 39;
+    case 0x0226: /* AC Stop */
+        return 40;
+    case 0x0223: /* AC Home */
+        return 41;
+    case 0x0221: /* AC Search */
+        return 42;
+    case 0x022A: /* AC Bookmarks */
+        return 43;
+    case 0x0196: /* AL Internet Browser */
+        return 44;
+    case 0x018A: /* AL Email Reader */
+        return 45;
+    case 0x0192: /* AL Calculator */
+        return 46;
+    case 0x022D: /* AC Zoom In */
+        return 47;
+    case 0x022E: /* AC Zoom Out */
+        return 48;
     default:
         return -ENOENT;
     }
@@ -1185,16 +1210,80 @@ static void process_pointer_9byte_report(const uint8_t *report, size_t report_le
                              POINTER_HWHEEL_RIGHT_SLOT);
 }
 
-static void handle_input_report_bytes(const uint8_t *data, uint16_t length) {
+static bool is_keyboard_usage_value(uint8_t usage) {
+    if (usage == 0U) {
+        return true;
+    }
+
+    return ((usage >= 0x04U && usage <= 0xA4U) || (usage >= 0xE0U && usage <= 0xE7U));
+}
+
+static bool looks_like_report_id_boot_kbd_9(const uint8_t *p) {
+    bool any_active = (p[1] != 0U);
+
+    if (!(p[0] >= 1U && p[0] <= 32U)) {
+        return false;
+    }
+
+    if (p[2] != 0U) {
+        return false;
+    }
+
+    for (uint8_t i = 3U; i < 9U; i++) {
+        if (!is_keyboard_usage_value(p[i])) {
+            return false;
+        }
+
+        if (p[i] != 0U) {
+            any_active = true;
+        }
+    }
+
+    return any_active;
+}
+
+static void handle_input_report_bytes(const uint8_t *data, uint16_t length, uint8_t sub_idx) {
     const uint8_t *p = data;
     uint16_t len = length;
+    uint8_t hint = (sub_idx < MAX_REPORT_SUBSCRIPTIONS) ? report_format_hint[sub_idx] : 0U;
 
     if (!p || len == 0U) {
         return;
     }
 
+    /* Hint values: 0=unknown,1=boot8,2=consumer12,3=pointer9,4=boot8+rid */
+    if (hint == 4U && len == POINTER_EXT_REPORT_LEN) {
+        process_boot_report(&p[1], BOOT_KBD_REPORT_LEN);
+        return;
+    } else if (hint == 3U && len == POINTER_EXT_REPORT_LEN) {
+        process_pointer_9byte_report(p, len);
+        return;
+    } else if (hint == 1U && len == BOOT_KBD_REPORT_LEN) {
+        process_boot_report(p, len);
+        return;
+    } else if (hint == 2U && len == 12U) {
+        process_nkro12_report(p, len);
+        return;
+    }
+
+    if (len == POINTER_EXT_REPORT_LEN) {
+        if (looks_like_report_id_boot_kbd_9(p)) {
+            if (sub_idx < MAX_REPORT_SUBSCRIPTIONS) {
+                report_format_hint[sub_idx] = 4U;
+            }
+            process_boot_report(&p[1], BOOT_KBD_REPORT_LEN);
+            return;
+        }
+
+        if (sub_idx < MAX_REPORT_SUBSCRIPTIONS) {
+            report_format_hint[sub_idx] = 3U;
+        }
+        process_pointer_9byte_report(p, len);
+        return;
+    }
+
     /* Some devices prepend Report ID. If len is not recognized, try stripping 1 byte. */
-    if (len != BOOT_KBD_REPORT_LEN && len != 12U && len != POINTER_EXT_REPORT_LEN && len > 1U) {
+    if (len != BOOT_KBD_REPORT_LEN && len != 12U && len > 1U) {
         uint8_t rid = p[0];
         if (rid >= 1U && rid <= 32U) {
             p++;
@@ -1204,12 +1293,15 @@ static void handle_input_report_bytes(const uint8_t *data, uint16_t length) {
     }
 
     if (len == BOOT_KBD_REPORT_LEN) {
+        if (sub_idx < MAX_REPORT_SUBSCRIPTIONS) {
+            report_format_hint[sub_idx] = 1U;
+        }
         process_boot_report(p, len);
     } else if (len == 12U) {
+        if (sub_idx < MAX_REPORT_SUBSCRIPTIONS) {
+            report_format_hint[sub_idx] = 2U;
+        }
         process_nkro12_report(p, len);
-    } else if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_ENABLE_POINTER_REPORTS) &&
-               len == POINTER_EXT_REPORT_LEN) {
-        process_pointer_9byte_report(p, len);
     } else if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_ENABLE_POINTER_REPORTS) &&
                (len == 3U || len == 4U)) {
         process_mouse_report(p, len);
@@ -1302,7 +1394,7 @@ static uint8_t notify_cb(struct bt_conn *conn, struct bt_gatt_subscribe_params *
     candidate_count = 0;
     candidate_index = 0;
 
-    handle_input_report_bytes(data, length);
+    handle_input_report_bytes(data, length, sub_idx);
     return BT_GATT_ITER_CONTINUE;
 }
 
@@ -1430,6 +1522,7 @@ static uint8_t discover_hids_cb(struct bt_conn *conn, const struct bt_gatt_attr 
     pending_report_char_handle = 0;
     pending_report_value_handle = 0;
     memset(subscribe_params, 0, sizeof(subscribe_params));
+    memset(report_format_hint, 0, sizeof(report_format_hint));
 
     err = resume_report_discovery(conn, (uint16_t)(hids_start_handle + 1U));
     if (err) {
@@ -1628,6 +1721,7 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
 
     memset(subscribe_params, 0, sizeof(subscribe_params));
     report_sub_count = 0;
+    memset(report_format_hint, 0, sizeof(report_format_hint));
     target_ready_announced = false;
     pending_report_char_handle = 0;
     pending_report_value_handle = 0;
