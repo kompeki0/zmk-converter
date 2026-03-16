@@ -259,6 +259,15 @@ config ZMK_BLE_HOGP_SNIFFER_BUTTON_SELECTOR
       If disabled, the sniffer uses fixed target MAC settings
       (CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET_MAC / ADDR_TYPE_PUBLIC).
 
+config ZMK_BLE_HOGP_SNIFFER_AUTO_SELECT_NAME_CONTAINS
+    string "Auto-select target when advertised name contains this text"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    depends on ZMK_BLE_HOGP_SNIFFER_BUTTON_SELECTOR
+    default ""
+    help
+      Case-insensitive substring used for automatic target selection while
+      button selector mode is active. Leave empty to disable auto-selection.
+
 config ZMK_BLE_HOGP_SNIFFER_WAIT_FOR_HOST_BEFORE_TARGET_SCAN
     bool "Wait host-PC connection before scanning target keyboard"
     depends on ZMK_BLE_HOGP_SNIFFER

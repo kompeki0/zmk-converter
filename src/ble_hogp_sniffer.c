@@ -393,20 +393,11 @@ static bool usage_exists(const uint8_t *usages, size_t count, uint8_t usage) {
     return false;
 }
 
-static bt_security_t cap_security_level_l2(bt_security_t level) {
-    if (level > BT_SECURITY_L2) {
-        return BT_SECURITY_L2;
-    }
-    return level;
-}
-
 static bt_security_t get_desired_security_level(void) {
-    bt_security_t configured =
-        cap_security_level_l2((bt_security_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_SECURITY_LEVEL);
+    bt_security_t configured = (bt_security_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_SECURITY_LEVEL;
 
     if (sec_policy_cycle_active) {
-        bt_security_t level = cap_security_level_l2(
-            zmk_hogp_sniffer_sec_policy_level_for_idx(sec_policy_try_idx));
+        bt_security_t level = zmk_hogp_sniffer_sec_policy_level_for_idx(sec_policy_try_idx);
         if (level < configured) {
             return configured;
         }
@@ -414,7 +405,7 @@ static bt_security_t get_desired_security_level(void) {
     }
 
     if (target_sec_hint_valid) {
-        bt_security_t hinted = cap_security_level_l2((bt_security_t)target_sec_level_hint);
+        bt_security_t hinted = (bt_security_t)target_sec_level_hint;
         if (hinted < configured) {
             return configured;
         }
@@ -428,8 +419,7 @@ static void step_security_policy_on_failure(int reason_code, const char *tag) {
     int64_t now = k_uptime_get();
     bt_security_t prev_level = get_desired_security_level();
     bt_security_t next_level;
-    bt_security_t configured =
-        cap_security_level_l2((bt_security_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_SECURITY_LEVEL);
+    bt_security_t configured = (bt_security_t)CONFIG_ZMK_BLE_HOGP_SNIFFER_SECURITY_LEVEL;
     bool auth_requirement = false;
 
     /* Pairing callbacks and security_changed can report the same failure. */
@@ -453,11 +443,13 @@ static void step_security_policy_on_failure(int reason_code, const char *tag) {
         if (prev_level <= BT_SECURITY_L1) {
             sec_policy_try_idx = 1U; /* raise to L2 */
         } else {
-            sec_policy_try_idx = 1U; /* keep at L2 (L3 disabled) */
+            sec_policy_try_idx = 0U; /* raise/keep at L3 */
         }
     } else if (!sec_policy_cycle_active) {
         sec_policy_cycle_active = true;
-        if (prev_level >= BT_SECURITY_L2) {
+        if (prev_level >= BT_SECURITY_L3) {
+            sec_policy_try_idx = 1U; /* L3 failed -> try L2 */
+        } else if (prev_level == BT_SECURITY_L2) {
             sec_policy_try_idx = 2U; /* L2 failed -> try L1 */
         } else {
             sec_policy_try_idx = 2U; /* already low -> keep L1 */
@@ -470,7 +462,9 @@ static void step_security_policy_on_failure(int reason_code, const char *tag) {
 
     /* Never drop below configured minimum security level. */
     if (next_level < configured) {
-        if (configured == BT_SECURITY_L2) {
+        if (configured >= BT_SECURITY_L3) {
+            sec_policy_try_idx = 0U; /* L3 */
+        } else if (configured == BT_SECURITY_L2) {
             sec_policy_try_idx = 1U; /* L2 */
         } else {
             sec_policy_try_idx = 2U; /* L1 */
@@ -1895,8 +1889,8 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
         }
 #endif
 
-        if (auth_requirement && !security_upgrade_attempted && wanted_sec < BT_SECURITY_L2) {
-            bt_security_t next_sec = BT_SECURITY_L2;
+        if (auth_requirement && !security_upgrade_attempted && wanted_sec < BT_SECURITY_L3) {
+            bt_security_t next_sec = (wanted_sec == BT_SECURITY_L1) ? BT_SECURITY_L2 : BT_SECURITY_L3;
             security_upgrade_attempted = true;
             LOG_WRN("Security requires stronger level, retry in-place: L%u -> L%u",
                     (uint32_t)wanted_sec, (uint32_t)next_sec);
@@ -2154,6 +2148,10 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
     char name[PICKER_NAME_MAX];
     bool has_name = false;
     bool auto_select_match = false;
+    const char *auto_select_name_substr = "";
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_AUTO_SELECT_NAME_CONTAINS)
+    auto_select_name_substr = CONFIG_ZMK_BLE_HOGP_SNIFFER_AUTO_SELECT_NAME_CONTAINS;
+#endif
 
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_SCAN_EVENTS)) {
         bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
@@ -2180,7 +2178,8 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
 
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_BUTTON_SELECTOR) && !selected_target_valid) {
         if (has_name) {
-            auto_select_match = ascii_contains_case_insensitive(name, "hesper");
+            auto_select_match = (auto_select_name_substr[0] != '\0') &&
+                                ascii_contains_case_insensitive(name, auto_select_name_substr);
             if (auto_select_match) {
                 bt_addr_le_copy(&target_addr, addr);
                 target_match_any_type = true;
@@ -2191,7 +2190,8 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
                 target_name_valid = (target_name[0] != '\0');
                 (void)save_persisted_target_addr(&target_addr);
                 (void)save_persisted_target_meta(target_sec_level_hint, target_name, target_name_valid);
-                LOG_INF("Auto-selected target by name match: %s", target_name);
+                LOG_INF("Auto-selected target by name match (%s): %s", auto_select_name_substr,
+                        target_name);
             }
             picker_add_or_update(addr, name, rssi);
         } else {
