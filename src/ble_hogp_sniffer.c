@@ -125,8 +125,8 @@ static struct bt_uuid_16 report_uuid = BT_UUID_INIT_16(BT_UUID_HIDS_REPORT_VAL);
 static struct bt_uuid_16 ccc_uuid = BT_UUID_INIT_16(BT_UUID_GATT_CCC_VAL);
 static struct bt_uuid_16 gap_device_name_uuid = BT_UUID_INIT_16(BT_UUID_GAP_DEVICE_NAME_VAL);
 static const struct bt_le_conn_param target_conn_param = {
-    .interval_min = 24, /* 30ms */
-    .interval_max = 40, /* 50ms */
+    .interval_min = 6, /* 7.5ms */
+    .interval_max = 9, /* 11.25ms */
     .latency = 0,
     .timeout = 2000, /* 20s supervision timeout */
 };
@@ -290,8 +290,57 @@ static bool usage_to_row_col(uint8_t usage, uint16_t *row, uint16_t *col) {
 
     /* Keep JIS/IME usages in their dedicated block (132..140),
      * separate from consumer slots (104..113).
+     * Reserve tail slots (153..164) for extended function keys (F13..F24).
      */
     switch (usage) {
+    case 0x68: /* F13 */
+        *row = 0;
+        *col = 153;
+        return true;
+    case 0x69: /* F14 */
+        *row = 0;
+        *col = 154;
+        return true;
+    case 0x6A: /* F15 */
+        *row = 0;
+        *col = 155;
+        return true;
+    case 0x6B: /* F16 */
+        *row = 0;
+        *col = 156;
+        return true;
+    case 0x6C: /* F17 */
+        *row = 0;
+        *col = 157;
+        return true;
+    case 0x6D: /* F18 */
+        *row = 0;
+        *col = 158;
+        return true;
+    case 0x6E: /* F19 */
+        *row = 0;
+        *col = 159;
+        return true;
+    case 0x6F: /* F20 */
+        *row = 0;
+        *col = 160;
+        return true;
+    case 0x70: /* F21 */
+        *row = 0;
+        *col = 161;
+        return true;
+    case 0x71: /* F22 */
+        *row = 0;
+        *col = 162;
+        return true;
+    case 0x72: /* F23 */
+        *row = 0;
+        *col = 163;
+        return true;
+    case 0x73: /* F24 */
+        *row = 0;
+        *col = 164;
+        return true;
     case 0x88: /* INT_KANA */
         *row = 0;
         *col = 132;
@@ -1762,7 +1811,7 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     if (derr && derr != -EALREADY) {
         LOG_WRN("bt_conn_le_param_update request failed (%d)", derr);
     } else {
-        LOG_INF("Requested stable conn params (30-50ms, lat=0, timeout=20s)");
+        LOG_INF("Requested low-latency conn params (7.5-11.25ms, lat=0, timeout=20s)");
     }
 
     if (wanted_sec <= BT_SECURITY_L1) {

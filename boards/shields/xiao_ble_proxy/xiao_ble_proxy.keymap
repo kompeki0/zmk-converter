@@ -73,6 +73,10 @@
                 &kp C_AC_HOME    &kp C_AC_SEARCH  &kp C_AC_BOOKMARKS
                 &kp C_AL_WWW     &kp C_AL_MAIL    &kp C_AL_CALC
                 &kp C_AC_ZOOM_IN &kp C_AC_ZOOM_OUT
+
+                /* 153..164: extended function keys */
+                &kp F13 &kp F14 &kp F15 &kp F16 &kp F17 &kp F18
+                &kp F19 &kp F20 &kp F21 &kp F22 &kp F23 &kp F24
             >;
         };
 
@@ -143,6 +147,10 @@
                 &kp C_AC_HOME    &kp C_AC_SEARCH  &kp C_AC_BOOKMARKS
                 &kp C_AL_WWW     &kp C_AL_MAIL    &kp C_AL_CALC
                 &kp C_AC_ZOOM_IN &kp C_AC_ZOOM_OUT
+
+                /* 153..164: extended function keys */
+                &kp F13 &kp F14 &kp F15 &kp F16 &kp F17 &kp F18
+                &kp F19 &kp F20 &kp F21 &kp F22 &kp F23 &kp F24
             >;
         };
     };
