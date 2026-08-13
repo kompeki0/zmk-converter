@@ -71,6 +71,7 @@ static struct k_work_delayable scan_cycle_work;
 static struct k_work_delayable candidate_connect_work;
 static struct k_work_delayable picker_probe_timeout_work;
 static struct k_work_delayable security_disconnect_work;
+static struct k_work_delayable hid_discovery_work;
 static struct k_work picker_button_work;
 K_MSGQ_DEFINE(picker_button_msgq, sizeof(uint8_t), 16, 4);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT) &&                                \
@@ -135,7 +136,9 @@ struct hogp_report_meta {
 
 struct hogp_target_state {
     struct bt_conn *conn;
-    struct bt_gatt_discover_params discover_params;
+    struct bt_gatt_discover_params hids_service_discover_params;
+    struct bt_gatt_discover_params hids_characteristic_discover_params;
+    struct bt_gatt_discover_params report_descriptor_discover_params[2];
     struct bt_gatt_read_params report_map_read_params;
     struct bt_gatt_read_params report_ref_read_params;
     struct bt_gatt_subscribe_params subscribe_params[MAX_REPORT_SUBSCRIPTIONS];
@@ -158,6 +161,7 @@ struct hogp_target_state {
     uint8_t report_sub_count;
     uint8_t hids_characteristic_count;
     uint8_t pending_hids_characteristic;
+    uint8_t report_descriptor_discover_slot;
     uint16_t report_map_len;
     uint16_t pending_report_ref_handle;
     uint16_t pending_ccc_handle;
@@ -183,7 +187,6 @@ struct hogp_target_state {
 static struct hogp_target_state active_target;
 
 #define default_conn active_target.conn
-#define discover_params active_target.discover_params
 #define subscribe_params active_target.subscribe_params
 #define report_meta active_target.report_meta
 #define target_addr active_target.addr
@@ -258,6 +261,9 @@ static uint8_t discover_hids_characteristic_cb(struct bt_conn *conn, const struc
 static void discover_next_input_report(struct bt_conn *conn);
 static void picker_button_work_handler(struct k_work *work);
 static void security_disconnect_work_handler(struct k_work *work);
+static void hid_discovery_work_handler(struct k_work *work);
+static void schedule_hid_discovery(uint32_t delay_ms);
+static int discover_hids(struct bt_conn *conn);
 static int save_persisted_target_addr(const bt_addr_le_t *addr);
 static int load_persisted_target_addr(bt_addr_le_t *addr, bool *valid);
 static int save_persisted_target_meta(uint8_t sec_level_hint, const char *name, bool has_name);
@@ -314,6 +320,33 @@ static void security_disconnect_work_handler(struct k_work *work) {
 static void schedule_security_disconnect(uint8_t reason, uint32_t delay_ms) {
     pending_disconnect_reason = reason;
     k_work_schedule(&security_disconnect_work, K_MSEC(delay_ms));
+}
+
+static void hid_discovery_work_handler(struct k_work *work) {
+    int err;
+    ARG_UNUSED(work);
+
+    if (!default_conn || !gatt_discovery_started) {
+        return;
+    }
+
+    LOG_INF("Starting HID discovery after security settle");
+    err = discover_hids(default_conn);
+    if (err == -ENOMEM || err == -EAGAIN) {
+        LOG_WRN("HID discovery temporarily busy (%d), retrying", err);
+        k_work_reschedule(&hid_discovery_work, K_MSEC(100));
+        return;
+    }
+    if (err) {
+        gatt_discovery_started = false;
+        LOG_ERR("HID discovery start failed (%d)", err);
+    }
+}
+
+static void schedule_hid_discovery(uint32_t delay_ms) {
+    gatt_discovery_started = true;
+    k_work_reschedule(&hid_discovery_work, K_MSEC(delay_ms));
+    LOG_INF("HID discovery scheduled in %u ms", delay_ms);
 }
 
 static bool usage_to_row_col(uint8_t usage, uint16_t *row, uint16_t *col) {
@@ -1961,13 +1994,22 @@ static void discover_next_input_report(struct bt_conn *conn) {
             continue;
         }
 
-        discover_params.uuid = NULL;
-        discover_params.start_handle = (uint16_t)(characteristic->value_handle + 1U);
-        discover_params.end_handle = characteristic->end_handle;
-        discover_params.type = BT_GATT_DISCOVER_DESCRIPTOR;
-        discover_params.func = discover_report_descriptor_cb;
+        /* Descriptor discovery may chain to the next report from inside its
+         * completion callback. Alternate parameter objects so Zephyr's
+         * cleanup of the just-completed procedure cannot clear the new one.
+         */
+        active_target.report_descriptor_discover_slot ^= 1U;
+        struct bt_gatt_discover_params *descriptor_params =
+            &active_target.report_descriptor_discover_params
+                 [active_target.report_descriptor_discover_slot];
+        memset(descriptor_params, 0, sizeof(*descriptor_params));
+        descriptor_params->uuid = NULL;
+        descriptor_params->start_handle = (uint16_t)(characteristic->value_handle + 1U);
+        descriptor_params->end_handle = characteristic->end_handle;
+        descriptor_params->type = BT_GATT_DISCOVER_DESCRIPTOR;
+        descriptor_params->func = discover_report_descriptor_cb;
 
-        int err = bt_gatt_discover(conn, &discover_params);
+        int err = bt_gatt_discover(conn, descriptor_params);
         if (err) {
             LOG_ERR("HID descriptor discovery failed for vh=0x%04x (%d)",
                     characteristic->value_handle, err);
@@ -1976,8 +2018,8 @@ static void discover_next_input_report(struct bt_conn *conn) {
         }
 
         LOG_INF("Inspecting HID input characteristic vh=0x%04x range=0x%04x-0x%04x",
-                characteristic->value_handle, discover_params.start_handle,
-                discover_params.end_handle);
+                characteristic->value_handle, descriptor_params->start_handle,
+                descriptor_params->end_handle);
         return;
     }
 
@@ -2169,6 +2211,7 @@ static uint8_t discover_hids_cb(struct bt_conn *conn, const struct bt_gatt_attr 
 
     report_sub_count = 0;
     hids_characteristic_count = 0;
+    active_target.report_descriptor_discover_slot = 0U;
     pending_report_char_handle = 0;
     pending_report_value_handle = 0;
     memset(subscribe_params, 0, sizeof(subscribe_params));
@@ -2183,12 +2226,15 @@ static uint8_t discover_hids_cb(struct bt_conn *conn, const struct bt_gatt_attr 
     hogp_hid_parser_reset(&active_target.hid_parser);
     report_map_valid = false;
 
-    discover_params.uuid = NULL;
-    discover_params.start_handle = (uint16_t)(hids_start_handle + 1U);
-    discover_params.end_handle = hids_end_handle;
-    discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
-    discover_params.func = discover_hids_characteristic_cb;
-    err = bt_gatt_discover(conn, &discover_params);
+    struct bt_gatt_discover_params *characteristic_params =
+        &active_target.hids_characteristic_discover_params;
+    memset(characteristic_params, 0, sizeof(*characteristic_params));
+    characteristic_params->uuid = NULL;
+    characteristic_params->start_handle = (uint16_t)(hids_start_handle + 1U);
+    characteristic_params->end_handle = hids_end_handle;
+    characteristic_params->type = BT_GATT_DISCOVER_CHARACTERISTIC;
+    characteristic_params->func = discover_hids_characteristic_cb;
+    err = bt_gatt_discover(conn, characteristic_params);
     if (err) {
         LOG_ERR("HID characteristic discovery failed (%d)", err);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
@@ -2206,13 +2252,16 @@ static uint8_t discover_hids_cb(struct bt_conn *conn, const struct bt_gatt_attr 
 }
 
 static int discover_hids(struct bt_conn *conn) {
-    discover_params.uuid = &hids_uuid.uuid;
-    discover_params.start_handle = BT_ATT_FIRST_ATTRIBUTE_HANDLE;
-    discover_params.end_handle = BT_ATT_LAST_ATTRIBUTE_HANDLE;
-    discover_params.type = BT_GATT_DISCOVER_PRIMARY;
-    discover_params.func = discover_hids_cb;
+    struct bt_gatt_discover_params *service_params =
+        &active_target.hids_service_discover_params;
+    memset(service_params, 0, sizeof(*service_params));
+    service_params->uuid = &hids_uuid.uuid;
+    service_params->start_handle = BT_ATT_FIRST_ATTRIBUTE_HANDLE;
+    service_params->end_handle = BT_ATT_LAST_ATTRIBUTE_HANDLE;
+    service_params->type = BT_GATT_DISCOVER_PRIMARY;
+    service_params->func = discover_hids_cb;
 
-    return bt_gatt_discover(conn, &discover_params);
+    return bt_gatt_discover(conn, service_params);
 }
 
 static void connected_cb(struct bt_conn *conn, uint8_t err) {
@@ -2333,6 +2382,7 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
         (void)save_persisted_target_meta(0U, target_name, target_name_valid);
     }
     gatt_discovery_started = false;
+    k_work_cancel_delayable(&hid_discovery_work);
     apply_host_adv_policy(true);
 
     derr = bt_conn_le_param_update(conn, &target_conn_param);
@@ -2343,12 +2393,8 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     }
 
     if (wanted_sec <= BT_SECURITY_L1) {
-        LOG_INF("Security L1 path: start HID discovery directly");
-        gatt_discovery_started = true;
-        derr = discover_hids(conn);
-        if (derr) {
-            LOG_ERR("HID discovery start failed (%d)", derr);
-        }
+        LOG_INF("Security L1 path: schedule HID discovery");
+        schedule_hid_discovery(200U);
         return;
     }
 
@@ -2356,11 +2402,7 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     derr = bt_conn_set_security(conn, wanted_sec);
     if (derr == -EALREADY) {
         LOG_INF("Security already satisfied (L%u)", (uint32_t)wanted_sec);
-        gatt_discovery_started = true;
-        derr = discover_hids(conn);
-        if (derr) {
-            LOG_ERR("HID discovery start failed (%d)", derr);
-        }
+        schedule_hid_discovery(200U);
         return;
     }
 
@@ -2395,6 +2437,7 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
 
     LOG_INF("Disconnected (reason 0x%02x: %s)", reason,
             zmk_hogp_sniffer_hci_reason_to_str(reason));
+    k_work_cancel_delayable(&hid_discovery_work);
     if (reason == BT_HCI_ERR_CONN_FAIL_TO_ESTAB || reason == BT_HCI_ERR_REMOTE_USER_TERM_CONN ||
         reason == BT_HCI_ERR_CONN_TIMEOUT) {
         next_connect_allowed_ms = k_uptime_get() + 10000;
@@ -2462,7 +2505,6 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
 }
 
 static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum bt_security_err err) {
-    int derr;
     bt_security_t wanted_sec = get_desired_security_level();
 
     if (conn != default_conn) {
@@ -2498,19 +2540,11 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
     target_sec_level_hint = (uint8_t)level;
     target_sec_hint_valid = true;
     (void)save_persisted_target_meta(target_sec_level_hint, target_name, target_name_valid);
-    gatt_discovery_started = true;
-    derr = discover_hids(conn);
-    if (derr) {
-        LOG_ERR("HID discovery start failed (%d)", derr);
+    schedule_hid_discovery(200U);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-        zmk_hogp_sniffer_screen_log_verbose_code(screen_emit_usage_state, "disc err", (uint32_t)derr);
+    zmk_hogp_sniffer_type_text_line(screen_emit_usage_state, "target secure");
+    zmk_hogp_sniffer_screen_log_verbose_text(screen_emit_usage_state, "disc hids");
 #endif
-    } else {
-#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-        zmk_hogp_sniffer_type_text_line(screen_emit_usage_state, "target secure");
-        zmk_hogp_sniffer_screen_log_verbose_text(screen_emit_usage_state, "disc hids");
-#endif
-    }
 }
 
 static void pairing_complete_cb(struct bt_conn *conn, bool bonded) {
@@ -3524,6 +3558,7 @@ static int ble_hogp_sniffer_schedule_init(void) {
     k_work_init_delayable(&candidate_connect_work, candidate_connect_work_handler);
     k_work_init_delayable(&picker_probe_timeout_work, picker_probe_timeout_work_handler);
     k_work_init_delayable(&security_disconnect_work, security_disconnect_work_handler);
+    k_work_init_delayable(&hid_discovery_work, hid_discovery_work_handler);
     k_work_init(&picker_button_work, picker_button_work_handler);
     k_work_init_delayable(&sniffer_start_work, sniffer_start_work_handler);
     k_work_schedule(&sniffer_start_work, K_SECONDS(3));
