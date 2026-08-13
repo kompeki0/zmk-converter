@@ -6,7 +6,7 @@
     hogp_kscan: hogp_kscan {
         compatible = "zmk,kscan-hogp-proxy";
         rows = <1>;
-        columns = <165>;
+        columns = <168>;
         input-gpios =
             <&gpio0 2 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
             <&gpio0 3 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
@@ -16,7 +16,7 @@
 
     default_transform: keymap_transform0 {
         compatible = "zmk,matrix-transform";
-        columns = <165>;
+        columns = <168>;
         rows = <1>;
         map = <
             RC(0,0)  RC(0,1)  RC(0,2)  RC(0,3)  RC(0,4)  RC(0,5)  RC(0,6)  RC(0,7)  RC(0,8)
@@ -38,7 +38,7 @@
             RC(0,139) RC(0,140) RC(0,141) RC(0,142) RC(0,143) RC(0,144) RC(0,145) RC(0,146)
             RC(0,147) RC(0,148) RC(0,149) RC(0,150) RC(0,151) RC(0,152) RC(0,153) RC(0,154)
             RC(0,155) RC(0,156) RC(0,157) RC(0,158) RC(0,159) RC(0,160) RC(0,161) RC(0,162)
-            RC(0,163) RC(0,164)
+            RC(0,163) RC(0,164) RC(0,165) RC(0,166) RC(0,167)
         >;
     };
 

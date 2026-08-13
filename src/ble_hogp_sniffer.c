@@ -13,6 +13,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
@@ -22,6 +23,7 @@
 #include <zmk/usb.h>
 
 #include "ble_hogp_sniffer_internal.h"
+#include "hid_report_parser.h"
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 #include <zmk/events/keycode_state_changed.h>
@@ -31,13 +33,15 @@ LOG_MODULE_REGISTER(ble_hogp_sniffer, CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_LEVEL);
 
 #define BOOT_KBD_REPORT_LEN 8
 #define POINTER_EXT_REPORT_LEN 9
-#define MAX_PRESSED_USAGES 14
-#define MAX_REPORT_SUBSCRIPTIONS 6
+#define MAX_PRESSED_USAGES HOGP_HID_MAX_KEY_USAGES
+#define MAX_REPORT_SUBSCRIPTIONS 12
+#define MAX_HIDS_CHARACTERISTICS 24
+#define MAX_REPORT_MAP_SIZE 512
 #define MAX_SCAN_CANDIDATES 12
 #define MAX_PICKER_DEVICES 16
 #define PICKER_NAME_MAX 20
 #define CONSUMER_SLOT_BASE 104
-#define CONSUMER_SLOT_COUNT 49
+#define CONSUMER_SLOT_COUNT 52
 #define POINTER_SLOT_BASE 118
 #define POINTER_BUTTON_SLOT_COUNT 5
 #define POINTER_AXIS_LEFT_SLOT 123
@@ -50,17 +54,6 @@ LOG_MODULE_REGISTER(ble_hogp_sniffer, CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_LEVEL);
 #define POINTER_HWHEEL_RIGHT_SLOT 130
 #define TARGET_NAME_MAX PICKER_NAME_MAX
 
-static struct bt_conn *default_conn;
-static struct bt_gatt_discover_params discover_params;
-static struct bt_gatt_subscribe_params subscribe_params[MAX_REPORT_SUBSCRIPTIONS];
-static bt_addr_le_t target_addr;
-static bool selected_target_valid;
-static bool target_any_addr;
-static bool target_match_any_type;
-static char target_name[TARGET_NAME_MAX];
-static bool target_name_valid;
-static uint8_t target_sec_level_hint;
-static bool target_sec_hint_valid;
 static bt_addr_le_t candidate_addrs[MAX_SCAN_CANDIDATES];
 struct picker_device {
     bt_addr_le_t addr;
@@ -87,28 +80,18 @@ static bool selftest_press;
 static bool selftest_done;
 #endif
 
-static uint16_t hids_start_handle;
-static uint16_t hids_end_handle;
 static bool scanning;
 static bool connecting;
 static bool in_candidate_sequence;
 static uint8_t candidate_count;
 static uint8_t candidate_index;
-static bool gatt_discovery_started;
 static uint8_t reconnect_fail_count;
 static bool host_adv_blocked;
 static bool host_connected;
-static bool target_hid_verified;
 static int64_t next_connect_allowed_ms;
 static bool sec_policy_cycle_active;
 static uint8_t sec_policy_try_idx;
 static int64_t last_sec_policy_step_ms;
-static uint8_t report_sub_count;
-static uint16_t pending_report_char_handle;
-static uint16_t pending_report_value_handle;
-static bool target_ready_announced;
-static bool security_failure_latched;
-static bool security_upgrade_attempted;
 static bool screen_typing_enabled;
 static struct bt_gatt_read_params picker_name_read_params;
 static bool picker_name_probe_active;
@@ -121,7 +104,7 @@ static bool picker_probe_addr_valid;
 static uint8_t pending_disconnect_reason;
 
 static struct bt_uuid_16 hids_uuid = BT_UUID_INIT_16(BT_UUID_HIDS_VAL);
-static struct bt_uuid_16 report_uuid = BT_UUID_INIT_16(BT_UUID_HIDS_REPORT_VAL);
+static struct bt_uuid_16 report_ref_uuid = BT_UUID_INIT_16(0x2908);
 static struct bt_uuid_16 ccc_uuid = BT_UUID_INIT_16(BT_UUID_GATT_CCC_VAL);
 static struct bt_uuid_16 gap_device_name_uuid = BT_UUID_INIT_16(BT_UUID_GAP_DEVICE_NAME_VAL);
 static const struct bt_le_conn_param target_conn_param = {
@@ -131,12 +114,107 @@ static const struct bt_le_conn_param target_conn_param = {
     .timeout = 2000, /* 20s supervision timeout */
 };
 
-static uint8_t prev_usages[MAX_PRESSED_USAGES];
-static size_t prev_usage_count;
-static uint8_t prev_consumer_slots[CONSUMER_SLOT_COUNT];
-static size_t prev_consumer_slot_count;
-static uint8_t prev_pointer_buttons;
-static uint8_t report_format_hint[MAX_REPORT_SUBSCRIPTIONS];
+struct hids_characteristic {
+    uint16_t uuid16;
+    uint16_t declaration_handle;
+    uint16_t value_handle;
+    uint16_t end_handle;
+    uint8_t properties;
+};
+
+struct hogp_report_meta {
+    uint8_t report_id;
+    uint8_t report_type;
+    bool report_ref_valid;
+    bool boot_keyboard;
+};
+
+struct hogp_target_state {
+    struct bt_conn *conn;
+    struct bt_gatt_discover_params discover_params;
+    struct bt_gatt_read_params report_map_read_params;
+    struct bt_gatt_read_params report_ref_read_params;
+    struct bt_gatt_subscribe_params subscribe_params[MAX_REPORT_SUBSCRIPTIONS];
+    struct hogp_report_meta report_meta[MAX_REPORT_SUBSCRIPTIONS];
+    struct hids_characteristic hids_characteristics[MAX_HIDS_CHARACTERISTICS];
+    struct hogp_hid_parser hid_parser;
+    uint8_t report_map[MAX_REPORT_MAP_SIZE];
+    bt_addr_le_t addr;
+    bool selected_valid;
+    bool any_addr;
+    bool match_any_type;
+    char name[TARGET_NAME_MAX];
+    bool name_valid;
+    uint8_t sec_level_hint;
+    bool sec_hint_valid;
+    uint16_t hids_start_handle;
+    uint16_t hids_end_handle;
+    bool gatt_discovery_started;
+    bool hid_verified;
+    uint8_t report_sub_count;
+    uint8_t hids_characteristic_count;
+    uint8_t pending_hids_characteristic;
+    uint16_t report_map_len;
+    uint16_t pending_report_ref_handle;
+    uint16_t pending_ccc_handle;
+    uint8_t pending_report_properties;
+    bool report_map_valid;
+    bool report_map_overflow;
+    uint16_t pending_report_char_handle;
+    uint16_t pending_report_value_handle;
+    bool ready_announced;
+    bool security_failure_latched;
+    bool security_upgrade_attempted;
+    uint8_t prev_usages[MAX_PRESSED_USAGES];
+    size_t prev_usage_count;
+    uint8_t prev_consumer_slots[CONSUMER_SLOT_COUNT];
+    size_t prev_consumer_slot_count;
+    uint8_t prev_pointer_buttons;
+    uint8_t report_format_hint[MAX_REPORT_SUBSCRIPTIONS];
+    uint8_t report_key_usages[MAX_REPORT_SUBSCRIPTIONS][MAX_PRESSED_USAGES];
+    uint8_t report_key_usage_count[MAX_REPORT_SUBSCRIPTIONS];
+    uint8_t report_consumer_slots[MAX_REPORT_SUBSCRIPTIONS][CONSUMER_SLOT_COUNT];
+    uint8_t report_consumer_slot_count[MAX_REPORT_SUBSCRIPTIONS];
+};
+
+static struct hogp_target_state active_target;
+
+#define default_conn active_target.conn
+#define discover_params active_target.discover_params
+#define subscribe_params active_target.subscribe_params
+#define report_meta active_target.report_meta
+#define target_addr active_target.addr
+#define selected_target_valid active_target.selected_valid
+#define target_any_addr active_target.any_addr
+#define target_match_any_type active_target.match_any_type
+#define target_name active_target.name
+#define target_name_valid active_target.name_valid
+#define target_sec_level_hint active_target.sec_level_hint
+#define target_sec_hint_valid active_target.sec_hint_valid
+#define hids_start_handle active_target.hids_start_handle
+#define hids_end_handle active_target.hids_end_handle
+#define gatt_discovery_started active_target.gatt_discovery_started
+#define target_hid_verified active_target.hid_verified
+#define report_sub_count active_target.report_sub_count
+#define hids_characteristic_count active_target.hids_characteristic_count
+#define pending_hids_characteristic active_target.pending_hids_characteristic
+#define report_map_len active_target.report_map_len
+#define pending_report_ref_handle active_target.pending_report_ref_handle
+#define pending_ccc_handle active_target.pending_ccc_handle
+#define pending_report_properties active_target.pending_report_properties
+#define report_map_valid active_target.report_map_valid
+#define report_map_overflow active_target.report_map_overflow
+#define pending_report_char_handle active_target.pending_report_char_handle
+#define pending_report_value_handle active_target.pending_report_value_handle
+#define target_ready_announced active_target.ready_announced
+#define security_failure_latched active_target.security_failure_latched
+#define security_upgrade_attempted active_target.security_upgrade_attempted
+#define prev_usages active_target.prev_usages
+#define prev_usage_count active_target.prev_usage_count
+#define prev_consumer_slots active_target.prev_consumer_slots
+#define prev_consumer_slot_count active_target.prev_consumer_slot_count
+#define prev_pointer_buttons active_target.prev_pointer_buttons
+#define report_format_hint active_target.report_format_hint
 
 struct persisted_target_addr {
     uint8_t type;
@@ -173,9 +251,9 @@ static void picker_try_next_name_probe(void);
 static uint8_t picker_name_read_cb(struct bt_conn *conn, uint8_t err, struct bt_gatt_read_params *params,
                                    const void *data, uint16_t length);
 static void picker_probe_timeout_work_handler(struct k_work *work);
-static int resume_report_discovery(struct bt_conn *conn, uint16_t next_start_handle);
-static uint8_t discover_report_cb(struct bt_conn *conn, const struct bt_gatt_attr *attr,
-                                  struct bt_gatt_discover_params *params);
+static uint8_t discover_hids_characteristic_cb(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                                               struct bt_gatt_discover_params *params);
+static void discover_next_input_report(struct bt_conn *conn);
 static void picker_button_work_handler(struct k_work *work);
 static void security_disconnect_work_handler(struct k_work *work);
 static int save_persisted_target_addr(const bt_addr_le_t *addr);
@@ -288,94 +366,110 @@ static bool usage_to_row_col(uint8_t usage, uint16_t *row, uint16_t *col) {
         }
     }
 
-    /* Keep JIS/IME usages in their dedicated block (132..140),
+    /* Keep ISO/JIS/IME usages in their dedicated block (131..143),
      * separate from consumer slots (104..113).
-     * Reserve tail slots (153..164) for extended function keys (F13..F24).
+     * Reserve tail slots (156..167) for extended function keys (F13..F24).
      */
     switch (usage) {
     case 0x68: /* F13 */
         *row = 0;
-        *col = 153;
+        *col = 156;
         return true;
     case 0x69: /* F14 */
         *row = 0;
-        *col = 154;
+        *col = 157;
         return true;
     case 0x6A: /* F15 */
         *row = 0;
-        *col = 155;
+        *col = 158;
         return true;
     case 0x6B: /* F16 */
         *row = 0;
-        *col = 156;
+        *col = 159;
         return true;
     case 0x6C: /* F17 */
         *row = 0;
-        *col = 157;
+        *col = 160;
         return true;
     case 0x6D: /* F18 */
         *row = 0;
-        *col = 158;
+        *col = 161;
         return true;
     case 0x6E: /* F19 */
         *row = 0;
-        *col = 159;
+        *col = 162;
         return true;
     case 0x6F: /* F20 */
         *row = 0;
-        *col = 160;
+        *col = 163;
         return true;
     case 0x70: /* F21 */
         *row = 0;
-        *col = 161;
+        *col = 164;
         return true;
     case 0x71: /* F22 */
         *row = 0;
-        *col = 162;
+        *col = 165;
         return true;
     case 0x72: /* F23 */
         *row = 0;
-        *col = 163;
+        *col = 166;
         return true;
     case 0x73: /* F24 */
         *row = 0;
-        *col = 164;
+        *col = 167;
         return true;
-    case 0x88: /* INT_KANA */
+    case 0x64: /* NON_US_BACKSLASH */
+        *row = 0;
+        *col = 131;
+        return true;
+    case 0x87: /* INT_RO / International 1 */
         *row = 0;
         *col = 132;
         return true;
-    case 0x8A: /* INT_HENKAN */
+    case 0x88: /* INT_KANA */
         *row = 0;
         *col = 133;
         return true;
-    case 0x8B: /* INT_MUHENKAN */
+    case 0x89: /* INT_YEN / International 3 */
         *row = 0;
         *col = 134;
         return true;
-    case 0x90: /* LANG1 */
+    case 0x8A: /* INT_HENKAN */
         *row = 0;
         *col = 135;
         return true;
-    case 0x91: /* LANG2 */
+    case 0x8B: /* INT_MUHENKAN */
         *row = 0;
         *col = 136;
         return true;
-    case 0x92: /* LANG3 */
+    case 0x8C: /* INT_KPJPCOMMA / International 6 */
         *row = 0;
         *col = 137;
         return true;
-    case 0x93: /* LANG4 */
+    case 0x90: /* LANG1 */
         *row = 0;
         *col = 138;
         return true;
-    case 0x94: /* LANG5 */
+    case 0x91: /* LANG2 */
         *row = 0;
         *col = 139;
         return true;
-    case 0x95: /* LANG6 */
+    case 0x92: /* LANG3 */
         *row = 0;
         *col = 140;
+        return true;
+    case 0x93: /* LANG4 */
+        *row = 0;
+        *col = 141;
+        return true;
+    case 0x94: /* LANG5 */
+        *row = 0;
+        *col = 142;
+        return true;
+    case 0x95: /* LANG6 */
+        *row = 0;
+        *col = 143;
         return true;
     default:
         break;
@@ -608,29 +702,29 @@ static int consumer_usage_to_slot(uint16_t usage) {
     case 0x00F8: /* Mic Mute (commonly used by PC keyboards) */
         return 9;
     case 0x0224: /* AC Back */
-        return 37;
-    case 0x0225: /* AC Forward */
-        return 38;
-    case 0x0227: /* AC Refresh */
-        return 39;
-    case 0x0226: /* AC Stop */
         return 40;
-    case 0x0223: /* AC Home */
+    case 0x0225: /* AC Forward */
         return 41;
-    case 0x0221: /* AC Search */
+    case 0x0227: /* AC Refresh */
         return 42;
-    case 0x022A: /* AC Bookmarks */
+    case 0x0226: /* AC Stop */
         return 43;
-    case 0x0196: /* AL Internet Browser */
+    case 0x0223: /* AC Home */
         return 44;
-    case 0x018A: /* AL Email Reader */
+    case 0x0221: /* AC Search */
         return 45;
-    case 0x0192: /* AL Calculator */
+    case 0x022A: /* AC Bookmarks */
         return 46;
-    case 0x022D: /* AC Zoom In */
+    case 0x0196: /* AL Internet Browser */
         return 47;
-    case 0x022E: /* AC Zoom Out */
+    case 0x018A: /* AL Email Reader */
         return 48;
+    case 0x0192: /* AL Calculator */
+        return 49;
+    case 0x022D: /* AC Zoom In */
+        return 50;
+    case 0x022E: /* AC Zoom Out */
+        return 51;
     default:
         return -ENOENT;
     }
@@ -1078,13 +1172,9 @@ static void clear_all_bonds_cb(const struct bt_bond_info *info, void *user_data)
     }
 }
 
-static void process_boot_report(const uint8_t *report, size_t report_len) {
-    uint8_t curr_usages[MAX_PRESSED_USAGES];
-    size_t curr_usage_count = 0;
+static void process_keyboard_usage_set(const uint8_t *curr_usages, size_t curr_usage_count) {
     uint8_t next_pointer_buttons = prev_pointer_buttons;
     bool pointer_buttons_changed = false;
-
-    build_usage_set_from_boot_report(report, report_len, curr_usages, &curr_usage_count);
 
     for (size_t i = 0; i < prev_usage_count; i++) {
         if (!usage_exists(curr_usages, curr_usage_count, prev_usages[i])) {
@@ -1223,12 +1313,15 @@ static void process_boot_report(const uint8_t *report, size_t report_len) {
     memcpy(prev_usages, curr_usages, curr_usage_count);
 }
 
-static void process_nkro12_report(const uint8_t *report, size_t report_len) {
-    uint8_t curr_slots[CONSUMER_SLOT_COUNT];
-    size_t curr_slot_count = 0;
+static void process_boot_report(const uint8_t *report, size_t report_len) {
+    uint8_t curr_usages[MAX_PRESSED_USAGES];
+    size_t curr_usage_count = 0;
 
-    build_consumer_slots_from_12byte_report(report, report_len, curr_slots, &curr_slot_count);
+    build_usage_set_from_boot_report(report, report_len, curr_usages, &curr_usage_count);
+    process_keyboard_usage_set(curr_usages, curr_usage_count);
+}
 
+static void process_consumer_slot_set(const uint8_t *curr_slots, size_t curr_slot_count) {
     for (size_t i = 0; i < prev_consumer_slot_count; i++) {
         if (!slot_exists(curr_slots, curr_slot_count, prev_consumer_slots[i])) {
             (void)zmk_hogp_proxy_kscan_inject(0, (uint16_t)(CONSUMER_SLOT_BASE + prev_consumer_slots[i]),
@@ -1244,6 +1337,88 @@ static void process_nkro12_report(const uint8_t *report, size_t report_len) {
 
     prev_consumer_slot_count = curr_slot_count;
     memcpy(prev_consumer_slots, curr_slots, curr_slot_count);
+}
+
+static void process_consumer_usage_set(const uint16_t *usages, size_t usage_count) {
+    uint8_t curr_slots[CONSUMER_SLOT_COUNT];
+    size_t curr_slot_count = 0;
+
+    for (size_t i = 0; i < usage_count; i++) {
+        int slot = consumer_usage_to_slot(usages[i]);
+        if (slot >= 0) {
+            append_slot_unique(curr_slots, &curr_slot_count, (uint8_t)slot);
+        }
+    }
+    process_consumer_slot_set(curr_slots, curr_slot_count);
+}
+
+static void update_descriptor_keyboard_state(uint8_t sub_idx, const uint8_t *usages,
+                                             size_t usage_count) {
+    uint8_t combined[MAX_PRESSED_USAGES];
+    size_t combined_count = 0U;
+
+    if (sub_idx >= MAX_REPORT_SUBSCRIPTIONS) {
+        return;
+    }
+    usage_count = MIN(usage_count, (size_t)MAX_PRESSED_USAGES);
+    active_target.report_key_usage_count[sub_idx] = (uint8_t)usage_count;
+    memcpy(active_target.report_key_usages[sub_idx], usages, usage_count);
+
+    for (uint8_t report = 0U; report < report_sub_count; report++) {
+        for (uint8_t i = 0U; i < active_target.report_key_usage_count[report]; i++) {
+            append_usage_unique(combined, &combined_count,
+                                active_target.report_key_usages[report][i]);
+        }
+    }
+    process_keyboard_usage_set(combined, combined_count);
+}
+
+static void update_descriptor_consumer_state(uint8_t sub_idx, const uint16_t *usages,
+                                             size_t usage_count) {
+    uint8_t combined_slots[CONSUMER_SLOT_COUNT];
+    size_t combined_count = 0U;
+
+    if (sub_idx >= MAX_REPORT_SUBSCRIPTIONS) {
+        return;
+    }
+
+    active_target.report_consumer_slot_count[sub_idx] = 0U;
+    for (size_t i = 0U; i < usage_count; i++) {
+        int slot = consumer_usage_to_slot(usages[i]);
+        if (slot >= 0) {
+            size_t count = active_target.report_consumer_slot_count[sub_idx];
+            append_slot_unique(active_target.report_consumer_slots[sub_idx], &count,
+                               (uint8_t)slot);
+            active_target.report_consumer_slot_count[sub_idx] = (uint8_t)count;
+        }
+    }
+
+    for (uint8_t report = 0U; report < report_sub_count; report++) {
+        for (uint8_t i = 0U; i < active_target.report_consumer_slot_count[report]; i++) {
+            append_slot_unique(combined_slots, &combined_count,
+                               active_target.report_consumer_slots[report][i]);
+        }
+    }
+    process_consumer_slot_set(combined_slots, combined_count);
+}
+
+static void process_nkro12_report(const uint8_t *report, size_t report_len) {
+    uint8_t slots[CONSUMER_SLOT_COUNT];
+    uint16_t usages[CONSUMER_SLOT_COUNT];
+    size_t slot_count = 0;
+
+    build_consumer_slots_from_12byte_report(report, report_len, slots, &slot_count);
+    for (size_t i = 0; i < slot_count; i++) {
+        usages[i] = 0U;
+        for (uint8_t n = 0U; n < 6U; n++) {
+            uint16_t usage = sys_get_le16(&report[n * 2U]);
+            if (consumer_usage_to_slot(usage) == slots[i]) {
+                usages[i] = usage;
+                break;
+            }
+        }
+    }
+    process_consumer_usage_set(usages, slot_count);
 }
 
 static void inject_pointer_pulse(uint16_t col) {
@@ -1398,6 +1573,41 @@ static bool looks_like_report_id_boot_kbd_9(const uint8_t *p) {
     return any_active;
 }
 
+static void process_decoded_pointer(const struct hogp_hid_decoded_report *decoded) {
+    uint8_t buttons = decoded->has_buttons ? decoded->buttons : prev_pointer_buttons;
+    int16_t dx = (int16_t)CLAMP(decoded->dx, INT16_MIN, INT16_MAX);
+    int16_t dy = (int16_t)CLAMP(decoded->dy, INT16_MIN, INT16_MAX);
+    int16_t wheel = (int16_t)CLAMP(decoded->wheel, INT16_MIN, INT16_MAX);
+    int16_t hwheel = (int16_t)CLAMP(decoded->hwheel, INT16_MIN, INT16_MAX);
+
+    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_USE_INPUT_LISTENER)) {
+        int err = zmk_hogp_proxy_pointer_event_ex(dx, dy, hwheel, wheel, buttons);
+        if (err == 0) {
+            prev_pointer_buttons = buttons;
+        } else if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_DEBUG_LOG)) {
+            LOG_WRN("descriptor pointer route failed (%d)", err);
+        }
+        return;
+    }
+
+    for (uint8_t bit = 0; bit < POINTER_BUTTON_SLOT_COUNT; bit++) {
+        bool prev = (prev_pointer_buttons & BIT(bit)) != 0U;
+        bool curr = (buttons & BIT(bit)) != 0U;
+        if (prev != curr) {
+            (void)zmk_hogp_proxy_kscan_inject(0, (uint16_t)(POINTER_SLOT_BASE + bit), curr);
+        }
+    }
+    prev_pointer_buttons = buttons;
+    emit_pointer_axis_pulses((int8_t)CLAMP(dx, -127, 127), POINTER_AXIS_LEFT_SLOT,
+                             POINTER_AXIS_RIGHT_SLOT);
+    emit_pointer_axis_pulses((int8_t)CLAMP(dy, -127, 127), POINTER_AXIS_UP_SLOT,
+                             POINTER_AXIS_DOWN_SLOT);
+    emit_pointer_axis_pulses((int8_t)CLAMP(wheel, -127, 127), POINTER_WHEEL_DOWN_SLOT,
+                             POINTER_WHEEL_UP_SLOT);
+    emit_pointer_axis_pulses((int8_t)CLAMP(hwheel, -127, 127), POINTER_HWHEEL_LEFT_SLOT,
+                             POINTER_HWHEEL_RIGHT_SLOT);
+}
+
 static void handle_input_report_bytes(const uint8_t *data, uint16_t length, uint8_t sub_idx) {
     const uint8_t *p = data;
     uint16_t len = length;
@@ -1405,6 +1615,29 @@ static void handle_input_report_bytes(const uint8_t *data, uint16_t length, uint
 
     if (!p || len == 0U) {
         return;
+    }
+
+    if (report_map_valid && sub_idx < report_sub_count && !report_meta[sub_idx].boot_keyboard) {
+        struct hogp_hid_decoded_report decoded;
+        int err = hogp_hid_parser_decode(&active_target.hid_parser, report_meta[sub_idx].report_id,
+                                         report_meta[sub_idx].report_ref_valid, p, len, &decoded);
+        if (err == 0) {
+            if (decoded.has_keyboard) {
+                update_descriptor_keyboard_state(sub_idx, decoded.key_usages,
+                                                 decoded.key_usage_count);
+            }
+            if (decoded.has_consumer) {
+                update_descriptor_consumer_state(sub_idx, decoded.consumer_usages,
+                                                 decoded.consumer_usage_count);
+            }
+            if (decoded.has_pointer &&
+                IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_ENABLE_POINTER_REPORTS)) {
+                process_decoded_pointer(&decoded);
+            }
+            return;
+        }
+        LOG_DBG("Report Map decode fallback: sub=%u id=%u err=%d len=%u", sub_idx,
+                report_meta[sub_idx].report_id, err, len);
     }
 
     /* Hint values: 0=unknown,1=boot8,2=consumer12,3=pointer9,4=boot8+rid */
@@ -1509,19 +1742,13 @@ static int clear_non_target_bonds(void) {
     return 0;
 }
 
-static int resume_report_discovery(struct bt_conn *conn, uint16_t next_start_handle) {
-    discover_params.uuid = &report_uuid.uuid;
-    discover_params.start_handle = next_start_handle;
-    discover_params.end_handle = hids_end_handle;
-    discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
-    discover_params.func = discover_report_cb;
-    return bt_gatt_discover(conn, &discover_params);
-}
-
 static uint8_t notify_cb(struct bt_conn *conn, struct bt_gatt_subscribe_params *params,
                          const void *data, uint16_t length) {
-    ARG_UNUSED(conn);
     uint8_t sub_idx = 0xFF;
+
+    if (conn != default_conn) {
+        return BT_GATT_ITER_STOP;
+    }
 
     for (uint8_t i = 0; i < report_sub_count; i++) {
         if (params == &subscribe_params[i]) {
@@ -1554,109 +1781,366 @@ static uint8_t notify_cb(struct bt_conn *conn, struct bt_gatt_subscribe_params *
     return BT_GATT_ITER_CONTINUE;
 }
 
-static uint8_t discover_ccc_cb(struct bt_conn *conn, const struct bt_gatt_attr *attr,
-                               struct bt_gatt_discover_params *params) {
-    int err;
-    ARG_UNUSED(params);
-
-    if (!attr) {
-        LOG_WRN("CCC descriptor not found for value handle 0x%04x", pending_report_value_handle);
-        err = resume_report_discovery(conn, (uint16_t)(pending_report_char_handle + 1U));
-        if (err) {
-            LOG_ERR("Resume report discovery failed (%d)", err);
-        }
-        return BT_GATT_ITER_STOP;
+static void finish_report_discovery(void) {
+    if (report_sub_count == 0U) {
+        LOG_ERR("No notifiable HID input characteristic subscribed");
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+        zmk_hogp_sniffer_screen_log_verbose_text(screen_emit_usage_state, "no report sub");
+#endif
+        schedule_security_disconnect(BT_HCI_ERR_REMOTE_USER_TERM_CONN, 100U);
+        return;
     }
 
-    if (bt_uuid_cmp(attr->uuid, &ccc_uuid.uuid) != 0) {
-        return BT_GATT_ITER_CONTINUE;
+    LOG_INF("HID discovery complete (subscriptions=%u, map=%s)", report_sub_count,
+            report_map_valid ? "parsed" : "fallback");
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+    zmk_hogp_sniffer_type_text_line(screen_emit_usage_state, "target ready");
+    zmk_hogp_sniffer_type_text_line(screen_emit_usage_state, "input stream on");
+    zmk_hogp_sniffer_screen_log_verbose_code(screen_emit_usage_state, "sub total", report_sub_count);
+#endif
+}
+
+static void subscribe_pending_report(struct bt_conn *conn, bool report_ref_valid, uint8_t report_id,
+                                     uint8_t report_type, bool boot_keyboard) {
+    int err;
+
+    if (report_ref_valid && report_type != 1U) {
+        LOG_DBG("Skip non-input Report id=%u type=%u vh=0x%04x", report_id, report_type,
+                pending_report_value_handle);
+        pending_hids_characteristic++;
+        discover_next_input_report(conn);
+        return;
     }
 
     if (report_sub_count >= MAX_REPORT_SUBSCRIPTIONS) {
-        LOG_WRN("Reached max report subscriptions (%u), skip vh=0x%04x", MAX_REPORT_SUBSCRIPTIONS,
-                pending_report_value_handle);
-    } else {
-        struct bt_gatt_subscribe_params *sub = &subscribe_params[report_sub_count];
-
-        memset(sub, 0, sizeof(*sub));
-        sub->notify = notify_cb;
-        sub->value = BT_GATT_CCC_NOTIFY;
-        sub->value_handle = pending_report_value_handle;
-        sub->ccc_handle = attr->handle;
-
-        err = bt_gatt_subscribe(conn, sub);
-        if (err) {
-            LOG_ERR("bt_gatt_subscribe failed for vh=0x%04x (%d)", pending_report_value_handle, err);
-#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-            zmk_hogp_sniffer_screen_log_verbose_code(screen_emit_usage_state, "sub err",
-                                                     (uint32_t)(-err));
-#endif
-        } else {
-            reconnect_fail_count = 0;
-            target_hid_verified = true;
-            report_sub_count++;
-            LOG_INF("Subscribed Input Report #%u (vh=0x%04x ccc=0x%04x)", report_sub_count,
-                    pending_report_value_handle, attr->handle);
-#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-            zmk_hogp_sniffer_screen_log_verbose_code(screen_emit_usage_state, "sub ok", report_sub_count);
-#endif
-        }
+        LOG_WRN("Reached max report subscriptions (%u), skip vh=0x%04x",
+                MAX_REPORT_SUBSCRIPTIONS, pending_report_value_handle);
+        pending_hids_characteristic++;
+        discover_next_input_report(conn);
+        return;
     }
 
-    err = resume_report_discovery(conn, (uint16_t)(pending_report_char_handle + 1U));
+    struct bt_gatt_subscribe_params *sub = &subscribe_params[report_sub_count];
+    struct hogp_report_meta *meta = &report_meta[report_sub_count];
+
+    memset(sub, 0, sizeof(*sub));
+    memset(meta, 0, sizeof(*meta));
+    sub->notify = notify_cb;
+    sub->value = (pending_report_properties & BT_GATT_CHRC_NOTIFY) != 0U
+                     ? BT_GATT_CCC_NOTIFY
+                     : BT_GATT_CCC_INDICATE;
+    sub->value_handle = pending_report_value_handle;
+    sub->ccc_handle = pending_ccc_handle;
+    atomic_set_bit(sub->flags, BT_GATT_SUBSCRIBE_FLAG_VOLATILE);
+    meta->report_id = report_id;
+    meta->report_type = report_type;
+    meta->report_ref_valid = report_ref_valid;
+    meta->boot_keyboard = boot_keyboard;
+
+    err = bt_gatt_subscribe(conn, sub);
     if (err) {
-        LOG_ERR("Resume report discovery failed (%d)", err);
+        LOG_ERR("bt_gatt_subscribe failed for vh=0x%04x (%d)", pending_report_value_handle, err);
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+        zmk_hogp_sniffer_screen_log_verbose_code(screen_emit_usage_state, "sub err",
+                                                 (uint32_t)(-err));
+#endif
+    } else {
+        reconnect_fail_count = 0;
+        target_hid_verified = true;
+        report_sub_count++;
+        LOG_INF("Subscribed HID input #%u (vh=0x%04x ccc=0x%04x id=%u%s)", report_sub_count,
+                pending_report_value_handle, pending_ccc_handle, report_id,
+                boot_keyboard ? " boot" : (report_ref_valid ? "" : " unknown"));
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+        zmk_hogp_sniffer_screen_log_verbose_code(screen_emit_usage_state, "sub ok", report_sub_count);
+#endif
     }
 
-    return BT_GATT_ITER_STOP;
+    pending_hids_characteristic++;
+    discover_next_input_report(conn);
 }
 
-static uint8_t discover_report_cb(struct bt_conn *conn, const struct bt_gatt_attr *attr,
-                                  struct bt_gatt_discover_params *params) {
-    int err;
-    const struct bt_gatt_chrc *chrc;
+static uint8_t report_ref_read_cb(struct bt_conn *conn, uint8_t err,
+                                  struct bt_gatt_read_params *params, const void *data,
+                                  uint16_t length) {
     ARG_UNUSED(params);
 
-    if (!attr) {
-        if (report_sub_count == 0) {
-            LOG_ERR("No notifiable Input Report characteristic subscribed");
-#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-            zmk_hogp_sniffer_screen_log_verbose_text(screen_emit_usage_state, "no report sub");
-#endif
-        } else {
-            LOG_INF("Report discovery complete (subscriptions=%u)", report_sub_count);
-#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-            zmk_hogp_sniffer_type_text_line(screen_emit_usage_state, "target ready");
-            zmk_hogp_sniffer_type_text_line(screen_emit_usage_state, "input stream on");
-            zmk_hogp_sniffer_screen_log_verbose_code(screen_emit_usage_state, "sub total", report_sub_count);
-#endif
-        }
+    if (conn != default_conn) {
         return BT_GATT_ITER_STOP;
     }
 
-    chrc = attr->user_data;
-    if (!(chrc->properties & BT_GATT_CHRC_NOTIFY)) {
+    if (err || !data || length < 2U) {
+        LOG_WRN("Report Reference read failed for vh=0x%04x (att=%u len=%u)",
+                pending_report_value_handle, err, length);
+        subscribe_pending_report(conn, false, 0U, 0U, false);
+        return BT_GATT_ITER_STOP;
+    }
+
+    const uint8_t *ref = data;
+    subscribe_pending_report(conn, true, ref[0], ref[1], false);
+    return BT_GATT_ITER_STOP;
+}
+
+static uint8_t discover_report_descriptor_cb(struct bt_conn *conn,
+                                              const struct bt_gatt_attr *attr,
+                                              struct bt_gatt_discover_params *params) {
+    ARG_UNUSED(params);
+
+    if (conn != default_conn) {
+        return BT_GATT_ITER_STOP;
+    }
+
+    if (attr) {
+        if (bt_uuid_cmp(attr->uuid, &ccc_uuid.uuid) == 0) {
+            pending_ccc_handle = attr->handle;
+        } else if (bt_uuid_cmp(attr->uuid, &report_ref_uuid.uuid) == 0) {
+            pending_report_ref_handle = attr->handle;
+        }
         return BT_GATT_ITER_CONTINUE;
     }
 
-    pending_report_char_handle = attr->handle;
-    pending_report_value_handle = chrc->value_handle;
-    LOG_INF("Found notifiable Input Report char vh=0x%04x", chrc->value_handle);
+    const struct hids_characteristic *characteristic =
+        &active_target.hids_characteristics[pending_hids_characteristic];
+    bool boot_keyboard = characteristic->uuid16 == 0x2A22U;
 
-    discover_params.uuid = &ccc_uuid.uuid;
-    discover_params.start_handle = (uint16_t)(chrc->value_handle + 1U);
-    discover_params.end_handle = hids_end_handle;
-    discover_params.type = BT_GATT_DISCOVER_DESCRIPTOR;
-    discover_params.func = discover_ccc_cb;
-
-    err = bt_gatt_discover(conn, &discover_params);
-    if (err) {
-        LOG_ERR("CCC discovery failed (%d)", err);
-    } else {
-        LOG_INF("Discovering CCC descriptor for vh=0x%04x", chrc->value_handle);
+    if (pending_ccc_handle == 0U) {
+        LOG_WRN("CCC not found in characteristic boundary for vh=0x%04x",
+                pending_report_value_handle);
+        pending_hids_characteristic++;
+        discover_next_input_report(conn);
+        return BT_GATT_ITER_STOP;
     }
 
+    if (boot_keyboard || pending_report_ref_handle == 0U) {
+        subscribe_pending_report(conn, false, 0U, 0U, boot_keyboard);
+        return BT_GATT_ITER_STOP;
+    }
+
+    memset(&active_target.report_ref_read_params, 0,
+           sizeof(active_target.report_ref_read_params));
+    active_target.report_ref_read_params.func = report_ref_read_cb;
+    active_target.report_ref_read_params.handle_count = 1U;
+    active_target.report_ref_read_params.single.handle = pending_report_ref_handle;
+    active_target.report_ref_read_params.single.offset = 0U;
+    int err = bt_gatt_read(conn, &active_target.report_ref_read_params);
+    if (err) {
+        LOG_WRN("Report Reference read start failed (%d)", err);
+        subscribe_pending_report(conn, false, 0U, 0U, false);
+    }
     return BT_GATT_ITER_STOP;
+}
+
+static void discover_next_input_report(struct bt_conn *conn) {
+    while (pending_hids_characteristic < hids_characteristic_count) {
+        const struct hids_characteristic *characteristic =
+            &active_target.hids_characteristics[pending_hids_characteristic];
+        bool is_report = characteristic->uuid16 == BT_UUID_HIDS_REPORT_VAL;
+        bool is_boot_keyboard = characteristic->uuid16 == 0x2A22U;
+        bool can_stream = (characteristic->properties &
+                           (BT_GATT_CHRC_NOTIFY | BT_GATT_CHRC_INDICATE)) != 0U;
+
+        if ((!is_report && !is_boot_keyboard) || !can_stream) {
+            pending_hids_characteristic++;
+            continue;
+        }
+
+        pending_report_char_handle = characteristic->declaration_handle;
+        pending_report_value_handle = characteristic->value_handle;
+        pending_report_properties = characteristic->properties;
+        pending_report_ref_handle = 0U;
+        pending_ccc_handle = 0U;
+
+        if (characteristic->value_handle >= characteristic->end_handle) {
+            LOG_WRN("No descriptor range for HID input vh=0x%04x", characteristic->value_handle);
+            pending_hids_characteristic++;
+            continue;
+        }
+
+        discover_params.uuid = NULL;
+        discover_params.start_handle = (uint16_t)(characteristic->value_handle + 1U);
+        discover_params.end_handle = characteristic->end_handle;
+        discover_params.type = BT_GATT_DISCOVER_DESCRIPTOR;
+        discover_params.func = discover_report_descriptor_cb;
+
+        int err = bt_gatt_discover(conn, &discover_params);
+        if (err) {
+            LOG_ERR("HID descriptor discovery failed for vh=0x%04x (%d)",
+                    characteristic->value_handle, err);
+            pending_hids_characteristic++;
+            continue;
+        }
+
+        LOG_INF("Inspecting HID input characteristic vh=0x%04x range=0x%04x-0x%04x",
+                characteristic->value_handle, discover_params.start_handle,
+                discover_params.end_handle);
+        return;
+    }
+
+    finish_report_discovery();
+}
+
+static void begin_input_report_discovery(struct bt_conn *conn) {
+    pending_hids_characteristic = 0U;
+    discover_next_input_report(conn);
+}
+
+static uint8_t report_map_read_cb(struct bt_conn *conn, uint8_t err,
+                                  struct bt_gatt_read_params *params, const void *data,
+                                  uint16_t length) {
+    ARG_UNUSED(params);
+
+    if (conn != default_conn) {
+        return BT_GATT_ITER_STOP;
+    }
+
+    if (err) {
+        LOG_WRN("Report Map read failed (att=%u); fixed-format fallback remains active", err);
+        report_map_valid = false;
+        begin_input_report_discovery(conn);
+        return BT_GATT_ITER_STOP;
+    }
+
+    if (data) {
+        size_t room = sizeof(active_target.report_map) - report_map_len;
+        size_t copy_len = MIN((size_t)length, room);
+        if (copy_len > 0U) {
+            memcpy(&active_target.report_map[report_map_len], data, copy_len);
+            report_map_len += (uint16_t)copy_len;
+        }
+        if (copy_len != length) {
+            report_map_overflow = true;
+        }
+        return BT_GATT_ITER_CONTINUE;
+    }
+
+    if (report_map_overflow) {
+        LOG_WRN("Report Map exceeds %u bytes; fixed-format fallback remains active",
+                MAX_REPORT_MAP_SIZE);
+    } else {
+        int parse_err = hogp_hid_parser_parse(&active_target.hid_parser,
+                                              active_target.report_map, report_map_len);
+        report_map_valid = parse_err == 0;
+        if (parse_err) {
+            LOG_WRN("Report Map parse failed (%d, len=%u); using fallback", parse_err,
+                    report_map_len);
+        } else {
+            LOG_INF("Report Map parsed (len=%u reports=%u fields=%u%s)", report_map_len,
+                    active_target.hid_parser.report_count, active_target.hid_parser.field_count,
+                    active_target.hid_parser.truncated ? " truncated" : "");
+        }
+    }
+
+    begin_input_report_discovery(conn);
+    return BT_GATT_ITER_STOP;
+}
+
+static void read_report_map_or_discover_inputs(struct bt_conn *conn) {
+    uint16_t report_map_handle = 0U;
+
+    for (uint8_t i = 0U; i < hids_characteristic_count; i++) {
+        if (active_target.hids_characteristics[i].uuid16 == 0x2A4BU) {
+            report_map_handle = active_target.hids_characteristics[i].value_handle;
+            break;
+        }
+    }
+
+    if (report_map_handle == 0U) {
+        LOG_WRN("Report Map characteristic not found; using fixed-format fallback");
+        begin_input_report_discovery(conn);
+        return;
+    }
+
+    memset(&active_target.report_map_read_params, 0,
+           sizeof(active_target.report_map_read_params));
+    active_target.report_map_read_params.func = report_map_read_cb;
+    active_target.report_map_read_params.handle_count = 1U;
+    active_target.report_map_read_params.single.handle = report_map_handle;
+    active_target.report_map_read_params.single.offset = 0U;
+    report_map_len = 0U;
+    report_map_overflow = false;
+    report_map_valid = false;
+
+    int err = bt_gatt_read(conn, &active_target.report_map_read_params);
+    if (err) {
+        LOG_WRN("Report Map read start failed (%d); using fallback", err);
+        begin_input_report_discovery(conn);
+    } else {
+        LOG_INF("Reading HID Report Map (vh=0x%04x)", report_map_handle);
+    }
+}
+
+static void select_boot_protocol_if_needed(struct bt_conn *conn) {
+    static const uint8_t boot_protocol = 0U;
+    uint16_t protocol_mode_handle = 0U;
+    bool has_report_input = false;
+    bool has_boot_keyboard_input = false;
+
+    for (uint8_t i = 0U; i < hids_characteristic_count; i++) {
+        const struct hids_characteristic *characteristic =
+            &active_target.hids_characteristics[i];
+        bool can_stream = (characteristic->properties &
+                           (BT_GATT_CHRC_NOTIFY | BT_GATT_CHRC_INDICATE)) != 0U;
+
+        if (characteristic->uuid16 == BT_UUID_HIDS_REPORT_VAL && can_stream) {
+            has_report_input = true;
+        } else if (characteristic->uuid16 == 0x2A22U && can_stream) {
+            has_boot_keyboard_input = true;
+        } else if (characteristic->uuid16 == 0x2A4EU) {
+            protocol_mode_handle = characteristic->value_handle;
+        }
+    }
+
+    if (!has_report_input && has_boot_keyboard_input && protocol_mode_handle != 0U) {
+        int err = bt_gatt_write_without_response(conn, protocol_mode_handle, &boot_protocol,
+                                                 sizeof(boot_protocol), false);
+        if (err) {
+            LOG_WRN("Boot Protocol Mode write failed (%d)", err);
+        } else {
+            LOG_INF("Selected HID Boot Protocol fallback (vh=0x%04x)", protocol_mode_handle);
+        }
+    }
+}
+
+static uint8_t discover_hids_characteristic_cb(struct bt_conn *conn,
+                                               const struct bt_gatt_attr *attr,
+                                               struct bt_gatt_discover_params *params) {
+    ARG_UNUSED(params);
+
+    if (conn != default_conn) {
+        return BT_GATT_ITER_STOP;
+    }
+
+    if (!attr) {
+        for (uint8_t i = 0U; i < hids_characteristic_count; i++) {
+            active_target.hids_characteristics[i].end_handle =
+                (i + 1U < hids_characteristic_count)
+                    ? (uint16_t)(active_target.hids_characteristics[i + 1U].declaration_handle - 1U)
+                    : hids_end_handle;
+        }
+        LOG_INF("HID characteristic topology discovered (count=%u)",
+                hids_characteristic_count);
+        select_boot_protocol_if_needed(conn);
+        read_report_map_or_discover_inputs(conn);
+        return BT_GATT_ITER_STOP;
+    }
+
+    const struct bt_gatt_chrc *chrc = attr->user_data;
+    if (hids_characteristic_count >= MAX_HIDS_CHARACTERISTICS) {
+        LOG_WRN("HID characteristic table full (%u)", MAX_HIDS_CHARACTERISTICS);
+        return BT_GATT_ITER_CONTINUE;
+    }
+
+    struct hids_characteristic *characteristic =
+        &active_target.hids_characteristics[hids_characteristic_count++];
+    memset(characteristic, 0, sizeof(*characteristic));
+    characteristic->declaration_handle = attr->handle;
+    characteristic->value_handle = chrc->value_handle;
+    characteristic->properties = chrc->properties;
+    if (chrc->uuid->type == BT_UUID_TYPE_16) {
+        characteristic->uuid16 = ((const struct bt_uuid_16 *)chrc->uuid)->val;
+    }
+
+    return BT_GATT_ITER_CONTINUE;
 }
 
 static uint8_t discover_hids_cb(struct bt_conn *conn, const struct bt_gatt_attr *attr,
@@ -1664,6 +2148,10 @@ static uint8_t discover_hids_cb(struct bt_conn *conn, const struct bt_gatt_attr 
     int err;
     const struct bt_gatt_service_val *svc;
     ARG_UNUSED(params);
+
+    if (conn != default_conn) {
+        return BT_GATT_ITER_STOP;
+    }
 
     if (!attr) {
         LOG_ERR("HID service not found");
@@ -1675,20 +2163,35 @@ static uint8_t discover_hids_cb(struct bt_conn *conn, const struct bt_gatt_attr 
     hids_end_handle = svc->end_handle;
 
     report_sub_count = 0;
+    hids_characteristic_count = 0;
     pending_report_char_handle = 0;
     pending_report_value_handle = 0;
     memset(subscribe_params, 0, sizeof(subscribe_params));
+    memset(report_meta, 0, sizeof(report_meta));
+    memset(active_target.hids_characteristics, 0, sizeof(active_target.hids_characteristics));
+    memset(active_target.report_key_usages, 0, sizeof(active_target.report_key_usages));
+    memset(active_target.report_key_usage_count, 0, sizeof(active_target.report_key_usage_count));
+    memset(active_target.report_consumer_slots, 0, sizeof(active_target.report_consumer_slots));
+    memset(active_target.report_consumer_slot_count, 0,
+           sizeof(active_target.report_consumer_slot_count));
     memset(report_format_hint, 0, sizeof(report_format_hint));
+    hogp_hid_parser_reset(&active_target.hid_parser);
+    report_map_valid = false;
 
-    err = resume_report_discovery(conn, (uint16_t)(hids_start_handle + 1U));
+    discover_params.uuid = NULL;
+    discover_params.start_handle = (uint16_t)(hids_start_handle + 1U);
+    discover_params.end_handle = hids_end_handle;
+    discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
+    discover_params.func = discover_hids_characteristic_cb;
+    err = bt_gatt_discover(conn, &discover_params);
     if (err) {
-        LOG_ERR("Report characteristic discovery failed (%d)", err);
+        LOG_ERR("HID characteristic discovery failed (%d)", err);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
         zmk_hogp_sniffer_screen_log_verbose_code(screen_emit_usage_state, "report disc err",
                                                  (uint32_t)(-err));
 #endif
     } else {
-        LOG_INF("HID service found, discovering Input Report characteristics");
+        LOG_INF("HID service found, discovering characteristic topology");
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
         zmk_hogp_sniffer_screen_log_verbose_text(screen_emit_usage_state, "hids found");
 #endif
@@ -1887,8 +2390,20 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
     }
 
     memset(subscribe_params, 0, sizeof(subscribe_params));
+    memset(report_meta, 0, sizeof(report_meta));
+    memset(active_target.hids_characteristics, 0, sizeof(active_target.hids_characteristics));
+    memset(active_target.report_key_usages, 0, sizeof(active_target.report_key_usages));
+    memset(active_target.report_key_usage_count, 0, sizeof(active_target.report_key_usage_count));
+    memset(active_target.report_consumer_slots, 0, sizeof(active_target.report_consumer_slots));
+    memset(active_target.report_consumer_slot_count, 0,
+           sizeof(active_target.report_consumer_slot_count));
     report_sub_count = 0;
+    hids_characteristic_count = 0;
     memset(report_format_hint, 0, sizeof(report_format_hint));
+    hogp_hid_parser_reset(&active_target.hid_parser);
+    report_map_len = 0U;
+    report_map_valid = false;
+    report_map_overflow = false;
     target_ready_announced = false;
     pending_report_char_handle = 0;
     pending_report_value_handle = 0;
@@ -2041,6 +2556,18 @@ static void auth_passkey_display_cb(struct bt_conn *conn, unsigned int passkey) 
 
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
     LOG_INF("Passkey display for %s: %06u", addr, passkey);
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+    bool output_ready = host_connected;
+#if defined(CONFIG_ZMK_USB)
+    output_ready = output_ready || zmk_usb_is_hid_ready();
+#endif
+    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_SHOW_PASSKEY_ON_HOST) && output_ready) {
+        char line[32];
+        snprintf(line, sizeof(line), "target passkey %06u", passkey);
+        zmk_hogp_sniffer_type_text_line(emit_usage_state, line);
+        LOG_INF("Passkey typed to connected host");
+    }
+#endif
 }
 
 static void auth_passkey_entry_cb(struct bt_conn *conn) {

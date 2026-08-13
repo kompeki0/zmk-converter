@@ -1,7 +1,8 @@
 # Phase 0: BLE Keyboard Proxy (XIAO BLE)
 
 ## Goal
-Receive BLE HID Input Reports from a fixed target keyboard and verify that incoming report bytes are logged.
+Receive BLE HID Input Reports from a target keyboard, decode its HID Report Map, and feed the
+result through the normal ZMK keymap pipeline.
 
 ## Current target
 - MAC: `dd:75:7b:9c:8a:1f`
@@ -40,13 +41,15 @@ west flash
 ```
 
 ## Expected logs
-Successful flow:
+Successful flow (wording can vary slightly):
 1. `Scanning started`
-2. `Target found, connecting`
+2. `Target candidate ... found`
 3. `Connected to target`
-4. `HID service found, discovering Input Report characteristic`
-5. `Subscribed to Input Report notifications`
-6. `HID Input` hexdump lines when keys are pressed on target keyboard
+4. `HID service found, discovering characteristic topology`
+5. `Report Map parsed`
+6. `Subscribed HID input`
+7. `HID discovery complete`
+8. `HID Input` hexdump lines when keys are pressed on target keyboard
 
 ## Troubleshooting
 1. No `Target found, connecting`
@@ -65,6 +68,22 @@ Successful flow:
 - Confirm keypresses are sent as notifications from target.
 - Check if target requires encryption/pairing before input notifications.
 
-## Notes
-- This is a minimum single-link verification path (1 target, 1 subscription).
-- `CONFIG_ZMK_SPLIT=n` is set in shield config to avoid split-central conflicts in this phase.
+5. A passkey is requested
+- With the debug-COM build, read `Passkey display ...` from the serial log.
+- If a USB or BLE host is already connected, the firmware also types
+  `target passkey NNNNNN` to it. Keep a text field focused, then type those six digits on the
+  target keyboard and press Enter.
+- Both sides may retain a failed bond. If retries fail immediately, run the factory-reset image
+  once, put the keyboard back into pairing mode, and flash the normal image again.
+
+## Compatibility notes
+- Report characteristics are associated with their own CCC and Report Reference descriptors;
+  output/feature reports are not subscribed accidentally.
+- Standard boot-style arrays, Report-ID reports, keyboard NKRO bitmaps, consumer controls, and
+  relative pointer fields are decoded from the Report Map. Fixed-length parsing remains only as a
+  fallback for devices with an unreadable or malformed map.
+- Up to 12 input characteristics are subscribed. Multi-report keyboard and consumer state is
+  merged before ZMK events are emitted.
+- `CONFIG_ZMK_SPLIT=n` avoids split-central conflicts.
+- Classic Bluetooth (BR/EDR HID) and proprietary 2.4 GHz receivers are not supported; the target
+  must expose Bluetooth LE HID service UUID `0x1812`.
