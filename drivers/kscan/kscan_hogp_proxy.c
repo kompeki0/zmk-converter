@@ -33,7 +33,8 @@ struct hogp_proxy_kscan_config {
 struct hogp_proxy_kscan_data;
 
 struct hogp_proxy_button {
-    struct gpio_dt_spec gpio;
+    const struct device *port;
+    gpio_pin_t pin;
     struct gpio_callback callback;
     struct hogp_proxy_kscan_data *owner;
     uint8_t index;
@@ -61,20 +62,19 @@ __attribute__((weak)) int zmk_hogp_sniffer_button_event(uint8_t idx, bool presse
 }
 
 static void hogp_proxy_gpio_cb(const struct device *port, struct gpio_callback *cb, uint32_t pins) {
-    ARG_UNUSED(port);
     struct hogp_proxy_button *button = CONTAINER_OF(cb, struct hogp_proxy_button, callback);
     struct hogp_proxy_kscan_data *data = button->owner;
 
-    if (!data || (pins & BIT(button->gpio.pin)) == 0U) {
+    if (!data || port != button->port || (pins & BIT(button->pin)) == 0U) {
         return;
     }
 
-    int val = gpio_pin_get_dt(&button->gpio);
+    int val = gpio_pin_get(button->port, button->pin);
     if (val < 0) {
         return;
     }
 
-    bool pressed = val > 0;
+    bool pressed = val == 0;
     if (pressed == button->pressed) {
         return;
     }
@@ -130,15 +130,12 @@ static const struct kscan_driver_api hogp_proxy_kscan_api = {
 static int hogp_proxy_kscan_init(const struct device *dev) {
     const struct hogp_proxy_kscan_config *cfg = dev->config;
     struct hogp_proxy_kscan_data *data = dev->data;
-    static const struct gpio_dt_spec button_gpios[] = {
-        GPIO_DT_SPEC_GET_BY_IDX(HOGP_PROXY_KSCAN_NODE, input_gpios, 0),
-        GPIO_DT_SPEC_GET_BY_IDX(HOGP_PROXY_KSCAN_NODE, input_gpios, 1),
-        GPIO_DT_SPEC_GET_BY_IDX(HOGP_PROXY_KSCAN_NODE, input_gpios, 2),
-        GPIO_DT_SPEC_GET_BY_IDX(HOGP_PROXY_KSCAN_NODE, input_gpios, 3),
-        GPIO_DT_SPEC_GET_BY_IDX(HOGP_PROXY_KSCAN_NODE, input_gpios, 4),
-        GPIO_DT_SPEC_GET_BY_IDX(HOGP_PROXY_KSCAN_NODE, input_gpios, 5),
-        GPIO_DT_SPEC_GET_BY_IDX(HOGP_PROXY_KSCAN_NODE, input_gpios, 6),
-    };
+    const struct device *gpio0 = DEVICE_DT_GET(DT_NODELABEL(gpio0));
+    const struct device *gpio1 = DEVICE_DT_GET(DT_NODELABEL(gpio1));
+    /* XIAO BLE Arduino pins D0..D6 map to P0.02, P0.03, P0.28,
+     * P0.29, P0.04, P0.05, and P1.11 respectively.
+     */
+    static const gpio_pin_t button_pins[] = {2, 3, 28, 29, 4, 5, 11};
 
     if (cfg->rows == 0 || cfg->cols == 0) {
         return -EINVAL;
@@ -151,34 +148,39 @@ static int hogp_proxy_kscan_init(const struct device *dev) {
     k_msgq_init(&data->msgq, (char *)data->qbuf, sizeof(data->qbuf[0]), ARRAY_SIZE(data->qbuf));
     k_work_init(&data->work, hogp_proxy_kscan_work_handler);
 
-    for (uint8_t i = 0; i < ARRAY_SIZE(button_gpios); i++) {
+    if (!device_is_ready(gpio0) || !device_is_ready(gpio1)) {
+        LOG_ERR("selector GPIO device not ready");
+        return -ENODEV;
+    }
+
+    for (uint8_t i = 0; i < ARRAY_SIZE(button_pins); i++) {
         struct hogp_proxy_button *button = &data->buttons[i];
-        button->gpio = button_gpios[i];
+        button->port = i == 6 ? gpio1 : gpio0;
+        button->pin = button_pins[i];
         button->owner = data;
         button->index = i;
 
-        if (!gpio_is_ready_dt(&button->gpio)) {
-            LOG_ERR("button %u GPIO device not ready", i);
-            return -ENODEV;
-        }
-
-        int err = gpio_pin_configure_dt(&button->gpio, GPIO_INPUT);
+        int err = gpio_pin_configure(button->port, button->pin, GPIO_INPUT | GPIO_PULL_UP);
         if (err) {
             LOG_ERR("button %u configure failed (%d)", i, err);
             return err;
         }
 
-        err = gpio_pin_interrupt_configure_dt(&button->gpio, GPIO_INT_EDGE_BOTH);
+        err = gpio_pin_interrupt_configure(button->port, button->pin, GPIO_INT_EDGE_BOTH);
         if (err) {
             LOG_ERR("button %u irq config failed (%d)", i, err);
             return err;
         }
 
-        int val = gpio_pin_get_dt(&button->gpio);
-        button->pressed = val > 0;
+        int val = gpio_pin_get(button->port, button->pin);
+        if (val < 0) {
+            LOG_ERR("button %u initial read failed (%d)", i, val);
+            return val;
+        }
+        button->pressed = val == 0;
         button->last_change_ms = 0;
-        gpio_init_callback(&button->callback, hogp_proxy_gpio_cb, BIT(button->gpio.pin));
-        err = gpio_add_callback(button->gpio.port, &button->callback);
+        gpio_init_callback(&button->callback, hogp_proxy_gpio_cb, BIT(button->pin));
+        err = gpio_add_callback(button->port, &button->callback);
         if (err) {
             LOG_ERR("button %u callback failed (%d)", i, err);
             return err;
@@ -214,9 +216,6 @@ int zmk_hogp_proxy_kscan_inject(uint16_t row, uint16_t col, bool pressed) {
  * Avoid DT_PROP(rows/columns) for now: some ZMK/Zephyr setups won't pick up
  * external bindings, causing property macros to be missing at compile-time.
  */
-BUILD_ASSERT(DT_PROP_LEN(HOGP_PROXY_KSCAN_NODE, input_gpios) == 7,
-             "HOGP proxy requires seven selector GPIOs");
-
 BUILD_ASSERT(DT_NUM_INST_STATUS_OKAY(zmk_kscan_hogp_proxy) <= 1,
              "Only one zmk,kscan-hogp-proxy instance is supported");
 

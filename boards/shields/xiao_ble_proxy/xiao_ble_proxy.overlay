@@ -1,5 +1,4 @@
 #include <dt-bindings/zmk/matrix_transform.h>
-#include <zephyr/dt-bindings/gpio/gpio.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 
 / {
@@ -7,14 +6,6 @@
         compatible = "zmk,kscan-hogp-proxy";
         rows = <1>;
         columns = <168>;
-        input-gpios =
-            <&gpio0 2 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
-            <&gpio0 3 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
-            <&gpio0 28 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
-            <&gpio0 29 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
-            <&gpio0 4 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
-            <&gpio0 5 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>,
-            <&gpio1 11 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
     };
 
     default_transform: keymap_transform0 {

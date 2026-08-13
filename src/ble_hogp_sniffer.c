@@ -205,7 +205,7 @@ struct hogp_target_state {
     size_t prev_usage_count;
     uint8_t prev_consumer_slots[CONSUMER_SLOT_COUNT];
     size_t prev_consumer_slot_count;
-    uint8_t prev_pointer_buttons;
+    uint8_t pointer_buttons;
     uint8_t report_format_hint[MAX_REPORT_SUBSCRIPTIONS];
     uint8_t report_key_usages[MAX_REPORT_SUBSCRIPTIONS][MAX_PRESSED_USAGES];
     uint8_t report_key_usage_count[MAX_REPORT_SUBSCRIPTIONS];
@@ -249,7 +249,7 @@ static struct hogp_target_state *active_target_ptr = &target_slots[0];
 #define prev_usage_count active_target.prev_usage_count
 #define prev_consumer_slots active_target.prev_consumer_slots
 #define prev_consumer_slot_count active_target.prev_consumer_slot_count
-#define prev_pointer_buttons active_target.prev_pointer_buttons
+#define prev_pointer_buttons active_target.pointer_buttons
 #define report_format_hint active_target.report_format_hint
 
 struct persisted_target_addr {
@@ -1478,7 +1478,7 @@ static uint8_t aggregate_pointer_buttons(uint8_t current_buttons) {
 
     for (uint8_t i = 0U; i < MAX_ACTIVE_TARGETS; i++) {
         if (&target_slots[i] != active_target_ptr && target_slots[i].conn) {
-            buttons |= target_slots[i].prev_pointer_buttons;
+            buttons |= target_slots[i].pointer_buttons;
         }
     }
     return buttons;
