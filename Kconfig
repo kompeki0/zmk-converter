@@ -9,7 +9,6 @@ config ZMK_BLE_HOGP_SNIFFER
 
 config ZMK_PROXY_HOST_BLE_OUTPUT
     bool "Enable standard ZMK Bluetooth output to the host"
-    depends on ZMK_BLE_HOGP_SNIFFER
     default n
     select ZMK_BLE
     help
