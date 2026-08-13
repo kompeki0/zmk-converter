@@ -129,10 +129,15 @@ static struct bt_uuid_16 report_ref_uuid = BT_UUID_INIT_16(0x2908);
 static struct bt_uuid_16 ccc_uuid = BT_UUID_INIT_16(BT_UUID_GATT_CCC_VAL);
 static struct bt_uuid_16 gap_device_name_uuid = BT_UUID_INIT_16(BT_UUID_GAP_DEVICE_NAME_VAL);
 static const struct bt_le_conn_param target_conn_param = {
-    .interval_min = 6, /* 7.5ms */
-    .interval_max = 9, /* 11.25ms */
+    /* Start with broadly supported HID-friendly parameters. Forcing the
+     * previous 7.5-11.25 ms interval made some keyboards time out while their
+     * relatively slow GATT database was being enumerated. The peripheral may
+     * still request its preferred power-saving parameters after connecting.
+     */
+    .interval_min = 24, /* 30ms, Zephyr recommended initial minimum */
+    .interval_max = 40, /* 50ms, Zephyr recommended initial maximum */
     .latency = 0,
-    .timeout = 2000, /* 20s supervision timeout */
+    .timeout = 3200, /* 32s supervision timeout */
 };
 
 struct hids_characteristic {
@@ -2353,6 +2358,9 @@ static uint8_t discover_hids_characteristic_cb(struct bt_conn *conn,
     if (chrc->uuid->type == BT_UUID_TYPE_16) {
         characteristic->uuid16 = ((const struct bt_uuid_16 *)chrc->uuid)->val;
     }
+    LOG_DBG("HID characteristic #%u uuid=0x%04x decl=0x%04x value=0x%04x props=0x%02x",
+            hids_characteristic_count, characteristic->uuid16, characteristic->declaration_handle,
+            characteristic->value_handle, characteristic->properties);
 
     return BT_GATT_ITER_CONTINUE;
 }
@@ -2446,7 +2454,8 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     bt_security_t wanted_sec = get_desired_security_level();
     const bt_addr_le_t *peer = bt_conn_get_dst(conn);
     struct bt_conn_info info = {0};
-    bool is_peripheral = (bt_conn_get_info(conn, &info) == 0 && info.role == BT_CONN_ROLE_PERIPHERAL);
+    int info_err = bt_conn_get_info(conn, &info);
+    bool is_peripheral = (info_err == 0 && info.role == BT_CONN_ROLE_PERIPHERAL);
 
     if (conn != default_conn) {
         if (!err && is_peripheral) {
@@ -2492,6 +2501,13 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     }
 
     LOG_INF("Connected to target");
+    if (info_err == 0 && info.type == BT_CONN_TYPE_LE) {
+        uint32_t interval_ms_x100 = (uint32_t)info.le.interval * 125U;
+        LOG_INF("Target conn params initial: interval=%u (%u.%02u ms), latency=%u, "
+                "timeout=%u ms",
+                info.le.interval, interval_ms_x100 / 100U, interval_ms_x100 % 100U,
+                info.le.latency, (uint32_t)info.le.timeout * 10U);
+    }
     security_failure_latched = false;
     screen_typing_enabled = false;
     if (sec_policy_cycle_active) {
@@ -2564,12 +2580,12 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     k_work_cancel_delayable(&gatt_stage_work);
     apply_host_adv_policy(true);
 
-    derr = bt_conn_le_param_update(conn, &target_conn_param);
-    if (derr && derr != -EALREADY) {
-        LOG_WRN("bt_conn_le_param_update request failed (%d)", derr);
-    } else {
-        LOG_INF("Requested low-latency conn params (7.5-11.25ms, lat=0, timeout=20s)");
-    }
+    /* bt_conn_le_create() already used target_conn_param. Do not immediately
+     * issue a second update: several commercial keyboards react poorly while
+     * security and service discovery are starting. Incoming peripheral
+     * parameter requests remain accepted by Zephyr's default policy.
+     */
+    LOG_INF("Using compatibility conn params (30-50ms, lat=0, timeout=32s)");
 
     if (wanted_sec <= BT_SECURITY_L1) {
         LOG_INF("Security L1 path: schedule HID discovery");
@@ -2683,6 +2699,19 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
     }
 
     (void)try_next_candidate_or_rescan();
+}
+
+static void le_param_updated_cb(struct bt_conn *conn, uint16_t interval, uint16_t latency,
+                                uint16_t timeout) {
+    uint32_t interval_ms_x100 = (uint32_t)interval * 125U;
+
+    if (conn != default_conn) {
+        return;
+    }
+
+    LOG_INF("Target conn params active: interval=%u (%u.%02u ms), latency=%u, timeout=%u ms",
+            interval, interval_ms_x100 / 100U, interval_ms_x100 % 100U, latency,
+            (uint32_t)timeout * 10U);
 }
 
 static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum bt_security_err err) {
@@ -2874,6 +2903,7 @@ static struct bt_conn_auth_info_cb auth_info_cb = {
 BT_CONN_CB_DEFINE(conn_callbacks) = {
     .connected = connected_cb,
     .disconnected = disconnected_cb,
+    .le_param_updated = le_param_updated_cb,
 #if defined(CONFIG_BT_SMP)
     .security_changed = security_changed_cb,
 #endif
