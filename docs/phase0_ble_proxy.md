@@ -4,9 +4,10 @@
 Receive BLE HID Input Reports from a target keyboard, decode its HID Report Map, and feed the
 result through the normal ZMK keymap pipeline.
 
-## Current target
-- MAC: `dd:75:7b:9c:8a:1f`
-- Address type: random (default)
+## Input targets
+
+The device-manager build does not use a fixed MAC or auto-connect rule. It can keep up to three
+selected BLE HID keyboards/mice connected concurrently.
 
 ## Build
 From your ZMK workspace:
@@ -51,23 +52,57 @@ After flashing and booting this reset firmware once, flash your normal firmware 
 west flash
 ```
 
-## Button selector operation
+## Seven-button device manager
 
-Connect four normally-open buttons between the XIAO pins and GND. Internal pull-ups are enabled:
+Connect seven normally-open buttons between the XIAO pins and GND. Internal pull-ups are enabled.
+No input device is connected automatically.
 
-- `D0` (`P0.02`): Up
-- `D1` (`P0.03`): Down
-- `D2` (`P0.28`): OK
-- `D3` (`P0.29`): Back/disconnect
+- `D0` (`P0.02`): reload/scan and print the numbered device list
+- `D1` (`P0.03`): selection up
+- `D2` (`P0.28`): selection down
+- `D3` (`P0.29`): connect the selected device
+- `D4` (`P0.04`): disconnect and remove the selected device's bond
+- `D5` (`P0.05`): disconnect all inputs and clear only their bonds/settings
+- `D6` (`P1.11`): close the manager and pass connected HID input to ZMK
 
-Put the target keyboard into pairing mode, then wait for `Found candidate ...` in the serial log.
-If its advertised name contains `AUTO_SELECT_NAME_CONTAINS`, `TARGET1_NAME_CONTAINS`, or
-`TARGET2_NAME_CONTAINS` (case-insensitive), it is selected and connected automatically; no button
-operation is needed. The buttons are the fallback for other devices.
-The initial selection is `RESETALL`; press Down twice to reach the first named device, checking the
-`sel ...` log after each press, then press OK. If the device has no advertised name, select
-`OTHER(n)` with one Down press and press OK to probe its GATT device name. `RESETALL` + OK clears
-all target bonds and saved selection, so do not select it during an ordinary connection.
+Each row has a combined status: `C` means connected, `R` means registered after successful HID
+discovery, and `B` means bonded (for example `[CRB]`). Devices are added to a persistent
+input-only registry after HID discovery succeeds, so host-PC bonds are not mixed into this list.
+Scanning refreshes the saved name and RSSI when the input device is advertising. Up to three BLE
+HID input devices can remain connected at the same time. After connecting one device, press D0
+again, select another, and press D3. Press D6 when all desired devices are connected.
+
+Opening/reloading the manager releases any keys/buttons currently held toward the host, preventing
+stuck keys while input passthrough is paused.
+
+`D4` and `D5` never erase PC-host bonds or ZMK host-profile selections. The one-shot factory/reset
+firmware remains available when a deliberate reset of both input and host Bluetooth state is needed.
+
+## Host output over ZMK Bluetooth
+
+Host output is selected in the configuration file with:
+
+```conf
+# Default: USB only, broadest input-device compatibility
+CONFIG_ZMK_PROXY_HOST_BLE_OUTPUT=n
+
+# Optional: USB + ordinary ZMK Bluetooth host profiles
+# CONFIG_ZMK_PROXY_HOST_BLE_OUTPUT=y
+```
+
+The default normal and debug builds keep this option disabled, so they can accept both Legacy
+Pairing and Secure Connections from input devices; host output is USB. The
+`xiao_ble_proxy_secure_ble_output`
+artifact enables ordinary ZMK Bluetooth output and reserves the fourth connection for the host.
+It advertises under ZMK's normal profile policy rather than waiting for an input device.
+Bond storage is sized for five host profiles plus three input devices. The simultaneous connection
+limit remains three inputs plus one host.
+
+On an input keyboard, hold the Application/Menu key (position 75) to enter keymap layer 2. Esc runs
+`BT_CLR`, and F1 through F5 run `BT_SEL 0` through `BT_SEL 4`. These are standard ZMK Bluetooth
+behaviors and can be changed in the keymap normally. Because upstream ZMK v0.3 forces
+Secure-Connections-only mode when `CONFIG_ZMK_BLE=y`, the BLE-output artifact cannot pair with a
+Legacy-only input keyboard; use the USB-output build for those devices.
 
 ## Expected logs
 Successful flow (wording can vary slightly):
@@ -75,7 +110,7 @@ Successful flow (wording can vary slightly):
 2. `Bluetooth settings loaded; identity ready`
 3. `Scanning started`
 4. `Target candidate ... found`
-5. `Connected to target`
+5. `Connected to target slot ...`
 6. `Pairing request from target accepted`
 7. `HID service found, discovering characteristic topology`
 8. `Report Map parsed`
@@ -91,6 +126,9 @@ Successful flow (wording can vary slightly):
 2. Connect fails repeatedly
 - Move devices closer and reset both sides.
 - Keep target keyboard in pairing/advertising mode.
+- `Unknown Connection Identifier (0x02)` means the create-connection attempt was cancelled or
+  timed out. The picker now waits for a connectable advertising packet instead of trying to use a
+  name-bearing scan response; put the input device back into pairing mode and retry D0 then D3.
 - Confirm the startup log says `Legacy + Secure Connections`. If it says `Secure Connections only`,
   the BLE-output artifact was flashed and a Legacy-only target cannot pair with it.
 

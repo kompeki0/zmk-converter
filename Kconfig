@@ -4,8 +4,20 @@ config ZMK_BLE_HOGP_SNIFFER
     bool "Enable BLE HOGP sniffer"
     depends on BT && BT_CENTRAL && BT_OBSERVER && BT_GATT_CLIENT
     help
-      Connect to a fixed BLE HID keyboard and subscribe to HID Input
-      Report notifications, then print incoming reports in logs.
+      Connect to BLE HID keyboards and pointing devices, subscribe to their
+      HID Input Reports, and feed decoded input through the ZMK pipeline.
+
+config ZMK_PROXY_HOST_BLE_OUTPUT
+    bool "Enable standard ZMK Bluetooth output to the host"
+    depends on ZMK_BLE_HOGP_SNIFFER
+    default n
+    select ZMK_BLE
+    help
+      If disabled (the default), output to the host over USB only and accept
+      both LE Legacy Pairing and LE Secure Connections from input devices.
+      If enabled, also expose ordinary ZMK Bluetooth host profiles. ZMK v0.3
+      then forces Secure-Connections-only pairing, so some older input
+      keyboards will no longer pair with the proxy.
 
 config ZMK_BLE_HOGP_SNIFFER_TARGET_MAC
     string "Target MAC address"
@@ -146,13 +158,13 @@ config ZMK_BLE_HOGP_SNIFFER_SHOW_PASSKEY_ON_HOST
       on the target keyboard followed by Enter.
 
 config ZMK_BLE_HOGP_SNIFFER_SINGLE_TARGET_ONLY
-    bool "After HID is verified, reconnect only to the single target"
+    bool "Use legacy single-target reconnect behavior"
     depends on ZMK_BLE_HOGP_SNIFFER
     default y
     help
-      If enabled, once HID reports are successfully subscribed, candidate
-      list traversal is disabled and reconnect flow always targets only the
-      configured target MAC.
+      Compatibility option for builds without the seven-button device
+      manager. The device-manager build disables automatic reconnect and
+      supports multiple explicit input connections.
 
 config ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS
     bool "Forward keyboard usages as ZMK key events"
@@ -279,12 +291,13 @@ config ZMK_BLE_HOGP_SNIFFER_BLOCK_HOST_ADV_UNTIL_TARGET_CONNECTED
       pair/connect.
 
 config ZMK_BLE_HOGP_SNIFFER_BUTTON_SELECTOR
-    bool "Enable 4-button target selector (Up/Down/OK/Back)"
+    bool "Enable 7-button multi-device manager"
     depends on ZMK_BLE_HOGP_SNIFFER
     default y
     help
-      Use external buttons to choose the target keyboard from discovered
-      candidate names (alnum), then connect/disconnect.
+      Use D0..D6 buttons to reload the numbered device list, move selection,
+      connect, reset one/all input-device bonds, and enable HID input
+      passthrough. Host-PC profiles are never cleared by these buttons.
       If disabled, the sniffer uses fixed target MAC settings
       (CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET_MAC / ADDR_TYPE_PUBLIC).
 
@@ -294,8 +307,8 @@ config ZMK_BLE_HOGP_SNIFFER_AUTO_SELECT_NAME_CONTAINS
     depends on ZMK_BLE_HOGP_SNIFFER_BUTTON_SELECTOR
     default ""
     help
-      Case-insensitive substring used for automatic target selection while
-      button selector mode is active. Leave empty to disable auto-selection.
+      Deprecated compatibility option. The 7-button device manager never
+      connects automatically; press D3 to connect the selected device.
 
 config ZMK_BLE_HOGP_SNIFFER_WAIT_FOR_HOST_BEFORE_TARGET_SCAN
     bool "Wait host-PC connection before scanning target keyboard"

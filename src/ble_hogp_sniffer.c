@@ -7,6 +7,7 @@
 #include <zephyr/bluetooth/addr.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/conn.h>
+#include <zephyr/bluetooth/gap.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/init.h>
@@ -55,6 +56,9 @@ LOG_MODULE_REGISTER(ble_hogp_sniffer, CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_LEVEL);
 #define POINTER_HWHEEL_LEFT_SLOT 129
 #define POINTER_HWHEEL_RIGHT_SLOT 130
 #define TARGET_NAME_MAX PICKER_NAME_MAX
+#define MAX_ACTIVE_TARGETS 3
+#define MAX_REGISTERED_TARGETS 8
+#define TARGET_REGISTRY_VERSION 1
 
 static bt_addr_le_t candidate_addrs[MAX_SCAN_CANDIDATES];
 struct picker_device {
@@ -99,6 +103,8 @@ static bool sec_policy_cycle_active;
 static uint8_t sec_policy_try_idx;
 static int64_t last_sec_policy_step_ms;
 static bool screen_typing_enabled;
+static bool picker_menu_active;
+static bool input_passthrough_enabled;
 static struct bt_gatt_read_params picker_name_read_params;
 static bool picker_name_probe_active;
 static bt_addr_le_t picker_unknown_addrs[MAX_PICKER_DEVICES];
@@ -108,6 +114,7 @@ static uint8_t picker_probe_pos;
 static bt_addr_le_t picker_probe_addr;
 static bool picker_probe_addr_valid;
 static uint8_t pending_disconnect_reason;
+static struct bt_conn *pending_disconnect_conn;
 
 enum hogp_gatt_stage {
     HOGP_GATT_STAGE_NONE,
@@ -123,6 +130,7 @@ static bool pending_sub_report_ref_valid;
 static uint8_t pending_sub_report_id;
 static uint8_t pending_sub_report_type;
 static bool pending_sub_boot_keyboard;
+static uint8_t position_hold_counts[168];
 
 static struct bt_uuid_16 hids_uuid = BT_UUID_INIT_16(BT_UUID_HIDS_VAL);
 static struct bt_uuid_16 report_ref_uuid = BT_UUID_INIT_16(0x2908);
@@ -205,7 +213,9 @@ struct hogp_target_state {
     uint8_t report_consumer_slot_count[MAX_REPORT_SUBSCRIPTIONS];
 };
 
-static struct hogp_target_state active_target;
+static struct hogp_target_state target_slots[MAX_ACTIVE_TARGETS];
+static struct hogp_target_state *active_target_ptr = &target_slots[0];
+#define active_target (*active_target_ptr)
 
 #define default_conn active_target.conn
 #define subscribe_params active_target.subscribe_params
@@ -253,8 +263,21 @@ struct persisted_target_meta {
     char name[TARGET_NAME_MAX];
 };
 
+struct persisted_registered_target {
+    uint8_t type;
+    uint8_t a[6];
+    char name[TARGET_NAME_MAX];
+};
+
+struct persisted_target_registry {
+    uint8_t version;
+    uint8_t count;
+    struct persisted_registered_target targets[MAX_REGISTERED_TARGETS];
+};
+
 static bool persisted_target_valid;
 static bool persisted_target_meta_valid;
+static struct persisted_target_registry target_registry;
 
 static int start_scan(void);
 static int connect_to_candidate(const bt_addr_le_t *addr);
@@ -270,9 +293,7 @@ static bool host_ready_for_target_scan(void);
 static bool ad_contains_hids_uuid(const struct net_buf_simple *ad);
 static bool ad_contains_split_service_uuid(const struct net_buf_simple *ad);
 static int picker_unknown_find_index_by_addr(const bt_addr_le_t *addr);
-static void picker_unknown_add_or_update(const bt_addr_le_t *addr);
 static void picker_unknown_remove_by_addr(const bt_addr_le_t *addr);
-static void picker_begin_name_probe(void);
 static void picker_try_next_name_probe(void);
 static uint8_t picker_name_read_cb(struct bt_conn *conn, uint8_t err, struct bt_gatt_read_params *params,
                                    const void *data, uint16_t length);
@@ -298,10 +319,16 @@ static int load_persisted_target_addr(bt_addr_le_t *addr, bool *valid);
 static int save_persisted_target_meta(uint8_t sec_level_hint, const char *name, bool has_name);
 static int load_persisted_target_meta(uint8_t *sec_level_hint, char *name, bool *has_name,
                                       bool *valid);
-static void clear_all_bonds_cb(const struct bt_bond_info *info, void *user_data);
 static void step_security_policy_on_failure(int reason_code, const char *tag);
 static void schedule_security_disconnect(uint8_t reason, uint32_t delay_ms);
 static void clear_default_conn_ref(void);
+static struct hogp_target_state *find_target_slot_by_conn(struct bt_conn *conn);
+static struct hogp_target_state *find_free_target_slot(void);
+static uint8_t target_slot_number(const struct hogp_target_state *target);
+static void release_all_target_inputs(void);
+static int target_registry_find(const bt_addr_le_t *addr);
+static int target_registry_add(const bt_addr_le_t *addr, const char *name);
+static int target_registry_remove(const bt_addr_le_t *addr);
 
 #if defined(CONFIG_BT_SMP)
 static struct bt_conn_auth_cb auth_cb;
@@ -313,6 +340,7 @@ static void screen_emit_usage_state(uint8_t usage, bool pressed);
 #endif
 
 int zmk_hogp_proxy_kscan_inject(uint16_t row, uint16_t col, bool pressed);
+static int inject_held_position(uint16_t row, uint16_t col, bool pressed);
 __attribute__((weak)) int zmk_hogp_proxy_pointer_event(int16_t dx, int16_t dy, int8_t wheel,
                                                        uint8_t buttons) {
     ARG_UNUSED(dx);
@@ -331,6 +359,32 @@ __attribute__((weak)) int zmk_hogp_proxy_pointer_event_ex(int16_t dx, int16_t dy
     return -ENOTSUP;
 }
 
+static int inject_held_position(uint16_t row, uint16_t col, bool pressed) {
+    if (row != 0U || col >= ARRAY_SIZE(position_hold_counts)) {
+        return zmk_hogp_proxy_kscan_inject(row, col, pressed);
+    }
+
+    if (pressed) {
+        if (position_hold_counts[col] == UINT8_MAX) {
+            return -EOVERFLOW;
+        }
+        position_hold_counts[col]++;
+        if (position_hold_counts[col] > 1U) {
+            return 0;
+        }
+    } else {
+        if (position_hold_counts[col] == 0U) {
+            return 0;
+        }
+        position_hold_counts[col]--;
+        if (position_hold_counts[col] > 0U) {
+            return 0;
+        }
+    }
+
+    return zmk_hogp_proxy_kscan_inject(row, col, pressed);
+}
+
 static void clear_default_conn_ref(void) {
     if (default_conn) {
         bt_conn_unref(default_conn);
@@ -338,16 +392,54 @@ static void clear_default_conn_ref(void) {
     }
 }
 
+static struct hogp_target_state *find_target_slot_by_conn(struct bt_conn *conn) {
+    if (!conn) {
+        return NULL;
+    }
+    for (uint8_t i = 0U; i < MAX_ACTIVE_TARGETS; i++) {
+        if (target_slots[i].conn == conn) {
+            return &target_slots[i];
+        }
+    }
+    return NULL;
+}
+
+static struct hogp_target_state *find_free_target_slot(void) {
+    for (uint8_t i = 0U; i < MAX_ACTIVE_TARGETS; i++) {
+        if (!target_slots[i].conn) {
+            return &target_slots[i];
+        }
+    }
+    return NULL;
+}
+
+static uint8_t target_slot_number(const struct hogp_target_state *target) {
+    if (!target || target < &target_slots[0] || target >= &target_slots[MAX_ACTIVE_TARGETS]) {
+        return 0U;
+    }
+    return (uint8_t)(target - &target_slots[0] + 1U);
+}
+
 static void security_disconnect_work_handler(struct k_work *work) {
+    struct bt_conn *conn = pending_disconnect_conn;
     ARG_UNUSED(work);
 
-    if (default_conn) {
-        (void)bt_conn_disconnect(default_conn, pending_disconnect_reason);
+    pending_disconnect_conn = NULL;
+    if (conn) {
+        (void)bt_conn_disconnect(conn, pending_disconnect_reason);
+        bt_conn_unref(conn);
     }
 }
 
 static void schedule_security_disconnect(uint8_t reason, uint32_t delay_ms) {
+    if (pending_disconnect_conn) {
+        bt_conn_unref(pending_disconnect_conn);
+        pending_disconnect_conn = NULL;
+    }
     pending_disconnect_reason = reason;
+    if (default_conn) {
+        pending_disconnect_conn = bt_conn_ref(default_conn);
+    }
     k_work_schedule(&security_disconnect_work, K_MSEC(delay_ms));
 }
 
@@ -952,37 +1044,6 @@ static bool extract_alnum_name(const struct net_buf_simple *ad, char *out, size_
     return ctx.found;
 }
 
-static char ascii_tolower_char(char c) {
-    if (c >= 'A' && c <= 'Z') {
-        return (char)(c - 'A' + 'a');
-    }
-    return c;
-}
-
-static bool ascii_contains_case_insensitive(const char *haystack, const char *needle) {
-    size_t i;
-    size_t j;
-
-    if (!haystack || !needle || needle[0] == '\0') {
-        return false;
-    }
-
-    for (i = 0; haystack[i] != '\0'; i++) {
-        for (j = 0; needle[j] != '\0'; j++) {
-            if (haystack[i + j] == '\0') {
-                return false;
-            }
-            if (ascii_tolower_char(haystack[i + j]) != ascii_tolower_char(needle[j])) {
-                break;
-            }
-        }
-        if (needle[j] == '\0') {
-            return true;
-        }
-    }
-    return false;
-}
-
 static int picker_find_index_by_addr(const bt_addr_le_t *addr) {
     for (uint8_t i = 0; i < picker_device_count; i++) {
         if (picker_devices[i].addr.type == addr->type &&
@@ -1003,20 +1064,6 @@ static int picker_unknown_find_index_by_addr(const bt_addr_le_t *addr) {
     return -ENOENT;
 }
 
-static void picker_unknown_add_or_update(const bt_addr_le_t *addr) {
-    if (picker_find_index_by_addr(addr) >= 0) {
-        return;
-    }
-    if (picker_unknown_find_index_by_addr(addr) >= 0) {
-        return;
-    }
-    if (picker_unknown_count >= MAX_PICKER_DEVICES) {
-        return;
-    }
-    bt_addr_le_copy(&picker_unknown_addrs[picker_unknown_count], addr);
-    picker_unknown_count++;
-}
-
 static void picker_unknown_remove_by_addr(const bt_addr_le_t *addr) {
     int idx = picker_unknown_find_index_by_addr(addr);
 
@@ -1030,7 +1077,79 @@ static void picker_unknown_remove_by_addr(const bt_addr_le_t *addr) {
     picker_unknown_count--;
 }
 
-static uint8_t picker_item_count(void) { return (uint8_t)(picker_device_count + 2U); }
+static uint8_t picker_item_count(void) { return picker_device_count; }
+
+struct picker_bond_lookup_ctx {
+    const bt_addr_le_t *addr;
+    bool found;
+};
+
+static void picker_bond_lookup_cb(const struct bt_bond_info *info, void *user_data) {
+    struct picker_bond_lookup_ctx *ctx = user_data;
+
+    if (info->addr.type == ctx->addr->type && bt_addr_eq(&info->addr.a, &ctx->addr->a)) {
+        ctx->found = true;
+    }
+}
+
+static bool picker_device_is_bonded(const bt_addr_le_t *addr) {
+    struct picker_bond_lookup_ctx ctx = {.addr = addr, .found = false};
+    bt_foreach_bond(BT_ID_DEFAULT, picker_bond_lookup_cb, &ctx);
+    return ctx.found;
+}
+
+static bool picker_device_is_connected(const bt_addr_le_t *addr) {
+    for (uint8_t i = 0U; i < MAX_ACTIVE_TARGETS; i++) {
+        if (target_slots[i].conn && target_slots[i].addr.type == addr->type &&
+            bt_addr_eq(&target_slots[i].addr.a, &addr->a)) {
+            struct bt_conn_info info;
+            if (bt_conn_get_info(target_slots[i].conn, &info) == 0 &&
+                info.state == BT_CONN_STATE_CONNECTED) {
+                return true;
+            }
+        }
+    }
+    struct bt_conn *conn = bt_conn_lookup_addr_le(BT_ID_DEFAULT, addr);
+
+    if (!conn) {
+        return false;
+    }
+    struct bt_conn_info info;
+    bool connected = bt_conn_get_info(conn, &info) == 0 && info.state == BT_CONN_STATE_CONNECTED;
+    bt_conn_unref(conn);
+    return connected;
+}
+
+static void picker_print_list(void) {
+    char line[64];
+
+    LOG_INF("Device list (%u): [>] selected [C] connected [R] registered [B] bonded",
+            picker_device_count);
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+    zmk_hogp_sniffer_type_text_line(screen_emit_usage_state, "DEVICE LIST");
+#endif
+    if (picker_device_count == 0U) {
+        LOG_INF("  (no devices; put a device in pairing mode and press D0)");
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+        zmk_hogp_sniffer_type_text_line(screen_emit_usage_state, "NO DEVICES");
+#endif
+        return;
+    }
+
+    for (uint8_t i = 0U; i < picker_device_count; i++) {
+        bool connected = picker_device_is_connected(&picker_devices[i].addr);
+        bool registered = target_registry_find(&picker_devices[i].addr) >= 0;
+        bool bonded = picker_device_is_bonded(&picker_devices[i].addr);
+        snprintf(line, sizeof(line), "%c%u [%c%c%c] %s RSSI%d",
+                 i == picker_selected_index ? '>' : ' ', (uint32_t)(i + 1U),
+                 connected ? 'C' : '-', registered ? 'R' : '-', bonded ? 'B' : '-',
+                 picker_devices[i].name, picker_devices[i].rssi);
+        LOG_INF("%s", line);
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+        zmk_hogp_sniffer_type_text_line(screen_emit_usage_state, line);
+#endif
+    }
+}
 
 static void picker_announce_current(const char *prefix) {
     char buf[48];
@@ -1040,26 +1159,12 @@ static void picker_announce_current(const char *prefix) {
         picker_selected_index = 0;
     }
 
-    if (picker_selected_index == 0U) {
-        snprintf(buf, sizeof(buf), "%s 0 RESETALL", prefix);
-        LOG_INF("%s", buf);
-#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-        zmk_hogp_sniffer_type_text_line(screen_emit_usage_state, buf);
-#endif
-        return;
+    if (items == 0U) {
+        snprintf(buf, sizeof(buf), "%s NO DEVICE", prefix);
+    } else {
+        snprintf(buf, sizeof(buf), "%s %u %s", prefix, (uint32_t)(picker_selected_index + 1U),
+                 picker_devices[picker_selected_index].name);
     }
-
-    if (picker_selected_index == 1U) {
-        snprintf(buf, sizeof(buf), "%s 1 OTHER(%u)", prefix, (uint32_t)picker_unknown_count);
-        LOG_INF("%s", buf);
-#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-        zmk_hogp_sniffer_type_text_line(screen_emit_usage_state, buf);
-#endif
-        return;
-    }
-
-    snprintf(buf, sizeof(buf), "%s %u %s", prefix, (uint32_t)picker_selected_index,
-             picker_devices[picker_selected_index - 2U].name);
     LOG_INF("%s", buf);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     zmk_hogp_sniffer_type_text_line(screen_emit_usage_state, buf);
@@ -1095,6 +1200,25 @@ static void picker_add_or_update(const bt_addr_le_t *addr, const char *name, int
             picker_devices[picker_device_count].name, rssi);
     picker_device_count++;
     picker_unknown_remove_by_addr(addr);
+}
+
+static void picker_load_saved_and_connected_devices(void) {
+    for (uint8_t i = 0U; i < target_registry.count; i++) {
+        bt_addr_le_t addr = {.type = target_registry.targets[i].type};
+        memcpy(addr.a.val, target_registry.targets[i].a, sizeof(addr.a.val));
+        picker_add_or_update(&addr,
+                             target_registry.targets[i].name[0] != '\0'
+                                 ? target_registry.targets[i].name
+                                 : "REGISTERED",
+                             INT8_MIN);
+    }
+    for (uint8_t i = 0U; i < MAX_ACTIVE_TARGETS; i++) {
+        if (!target_slots[i].conn) {
+            continue;
+        }
+        picker_add_or_update(&target_slots[i].addr,
+                             target_slots[i].name_valid ? target_slots[i].name : "CONNECTED", 0);
+    }
 }
 
 static void picker_try_next_name_probe(void) {
@@ -1141,21 +1265,6 @@ static void picker_try_next_name_probe(void) {
     picker_selected_index = 1U;
     picker_announce_current("other done");
     (void)start_scan();
-}
-
-static void picker_begin_name_probe(void) {
-    picker_probe_count = picker_unknown_count;
-    picker_probe_pos = 0;
-    picker_probe_addr_valid = false;
-
-    if (picker_probe_count == 0U) {
-        picker_announce_current("other none");
-        return;
-    }
-
-    picker_name_probe_active = true;
-    picker_announce_current("other probe");
-    picker_try_next_name_probe();
 }
 
 static int settings_set_target_addr(const char *name, size_t len_rd, settings_read_cb read_cb,
@@ -1208,6 +1317,27 @@ static int settings_set_target_addr(const char *name, size_t len_rd, settings_re
         return 0;
     }
 
+    if (strcmp(name, "devices") == 0) {
+        if (len_rd != sizeof(target_registry)) {
+            /* Treat stale/older registry layouts as empty. Bond data remains
+             * intact and a successful HID discovery will rebuild this list.
+             */
+            memset(&target_registry, 0, sizeof(target_registry));
+            LOG_WRN("Ignoring incompatible target registry (size=%u)",
+                    (uint32_t)len_rd);
+            return 0;
+        }
+        len = read_cb(cb_arg, &target_registry, sizeof(target_registry));
+        if (len != sizeof(target_registry) ||
+            target_registry.version != TARGET_REGISTRY_VERSION ||
+            target_registry.count > MAX_REGISTERED_TARGETS) {
+            memset(&target_registry, 0, sizeof(target_registry));
+            LOG_WRN("Ignoring invalid target registry");
+            return 0;
+        }
+        return 0;
+    }
+
     return -ENOENT;
 }
 
@@ -1239,6 +1369,58 @@ static int save_persisted_target_meta(uint8_t sec_level_hint, const char *name, 
     }
 
     return settings_save_one("ble_hogp_sniffer/target_meta", &meta, sizeof(meta));
+}
+
+static int target_registry_save(void) {
+    target_registry.version = TARGET_REGISTRY_VERSION;
+    return settings_save_one("ble_hogp_sniffer/devices", &target_registry,
+                             sizeof(target_registry));
+}
+
+static int target_registry_find(const bt_addr_le_t *addr) {
+    for (uint8_t i = 0U; i < target_registry.count; i++) {
+        if (target_registry.targets[i].type == addr->type &&
+            memcmp(target_registry.targets[i].a, addr->a.val,
+                   sizeof(target_registry.targets[i].a)) == 0) {
+            return i;
+        }
+    }
+    return -ENOENT;
+}
+
+static int target_registry_add(const bt_addr_le_t *addr, const char *name) {
+    int index = target_registry_find(addr);
+
+    if (index < 0) {
+        if (target_registry.count >= MAX_REGISTERED_TARGETS) {
+            return -ENOMEM;
+        }
+        index = target_registry.count++;
+    }
+
+    struct persisted_registered_target *entry = &target_registry.targets[index];
+    memset(entry, 0, sizeof(*entry));
+    entry->type = addr->type;
+    memcpy(entry->a, addr->a.val, sizeof(entry->a));
+    if (name) {
+        strncpy(entry->name, name, sizeof(entry->name) - 1U);
+    }
+    return target_registry_save();
+}
+
+static int target_registry_remove(const bt_addr_le_t *addr) {
+    int index = target_registry_find(addr);
+
+    if (index < 0) {
+        return index;
+    }
+    for (uint8_t i = (uint8_t)index; i + 1U < target_registry.count; i++) {
+        target_registry.targets[i] = target_registry.targets[i + 1U];
+    }
+    target_registry.count--;
+    memset(&target_registry.targets[target_registry.count], 0,
+           sizeof(target_registry.targets[target_registry.count]));
+    return target_registry_save();
 }
 
 static int load_persisted_target_addr(bt_addr_le_t *addr, bool *valid) {
@@ -1291,18 +1473,15 @@ static int load_persisted_target_meta(uint8_t *sec_level_hint, char *name, bool 
     return 0;
 }
 
-static void clear_all_bonds_cb(const struct bt_bond_info *info, void *user_data) {
-    char addr_str[BT_ADDR_LE_STR_LEN];
-    int err;
-    ARG_UNUSED(user_data);
+static uint8_t aggregate_pointer_buttons(uint8_t current_buttons) {
+    uint8_t buttons = current_buttons;
 
-    err = bt_unpair(BT_ID_DEFAULT, &info->addr);
-    bt_addr_le_to_str(&info->addr, addr_str, sizeof(addr_str));
-    if (err) {
-        LOG_WRN("Failed to clear bond %s (%d)", addr_str, err);
-    } else {
-        LOG_INF("Cleared bond: %s", addr_str);
+    for (uint8_t i = 0U; i < MAX_ACTIVE_TARGETS; i++) {
+        if (&target_slots[i] != active_target_ptr && target_slots[i].conn) {
+            buttons |= target_slots[i].prev_pointer_buttons;
+        }
     }
+    return buttons;
 }
 
 static void process_keyboard_usage_set(const uint8_t *curr_usages, size_t curr_usage_count) {
@@ -1359,7 +1538,8 @@ static void process_keyboard_usage_set(const uint8_t *curr_usages, size_t curr_u
 
     if (pointer_buttons_changed) {
         if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_USE_INPUT_LISTENER)) {
-            int err = zmk_hogp_proxy_pointer_event_ex(0, 0, 0, 0, next_pointer_buttons);
+            int err = zmk_hogp_proxy_pointer_event_ex(
+                0, 0, 0, 0, aggregate_pointer_buttons(next_pointer_buttons));
             if (err && IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_DEBUG_LOG)) {
                 LOG_WRN("kbd->pointer route failed (%d)", err);
             }
@@ -1368,7 +1548,7 @@ static void process_keyboard_usage_set(const uint8_t *curr_usages, size_t curr_u
                 bool prev = (prev_pointer_buttons & BIT(bit)) != 0U;
                 bool curr = (next_pointer_buttons & BIT(bit)) != 0U;
                 if (prev != curr) {
-                    (void)zmk_hogp_proxy_kscan_inject(0, (uint16_t)(POINTER_SLOT_BASE + bit), curr);
+                    (void)inject_held_position(0, (uint16_t)(POINTER_SLOT_BASE + bit), curr);
                 }
             }
         }
@@ -1419,7 +1599,7 @@ static void process_keyboard_usage_set(const uint8_t *curr_usages, size_t curr_u
                 }
                 uint16_t row, col;
                 if (usage_to_row_col(prev_usages[i], &row, &col)) {
-                    (void)zmk_hogp_proxy_kscan_inject(row, col, false);
+                    (void)inject_held_position(row, col, false);
                 }
             }
         }
@@ -1435,7 +1615,7 @@ static void process_keyboard_usage_set(const uint8_t *curr_usages, size_t curr_u
                 }
                 uint16_t row, col;
                 if (usage_to_row_col(curr_usages[i], &row, &col)) {
-                    (void)zmk_hogp_proxy_kscan_inject(row, col, true);
+                    (void)inject_held_position(row, col, true);
                 }
             }
         }
@@ -1443,7 +1623,9 @@ static void process_keyboard_usage_set(const uint8_t *curr_usages, size_t curr_u
 #endif
 
     prev_usage_count = curr_usage_count;
-    memcpy(prev_usages, curr_usages, curr_usage_count);
+    if (curr_usage_count > 0U) {
+        memcpy(prev_usages, curr_usages, curr_usage_count);
+    }
 }
 
 static void process_boot_report(const uint8_t *report, size_t report_len) {
@@ -1457,19 +1639,22 @@ static void process_boot_report(const uint8_t *report, size_t report_len) {
 static void process_consumer_slot_set(const uint8_t *curr_slots, size_t curr_slot_count) {
     for (size_t i = 0; i < prev_consumer_slot_count; i++) {
         if (!slot_exists(curr_slots, curr_slot_count, prev_consumer_slots[i])) {
-            (void)zmk_hogp_proxy_kscan_inject(0, (uint16_t)(CONSUMER_SLOT_BASE + prev_consumer_slots[i]),
-                                              false);
+            (void)inject_held_position(0,
+                                       (uint16_t)(CONSUMER_SLOT_BASE + prev_consumer_slots[i]),
+                                       false);
         }
     }
 
     for (size_t i = 0; i < curr_slot_count; i++) {
         if (!slot_exists(prev_consumer_slots, prev_consumer_slot_count, curr_slots[i])) {
-            (void)zmk_hogp_proxy_kscan_inject(0, (uint16_t)(CONSUMER_SLOT_BASE + curr_slots[i]), true);
+            (void)inject_held_position(0, (uint16_t)(CONSUMER_SLOT_BASE + curr_slots[i]), true);
         }
     }
 
     prev_consumer_slot_count = curr_slot_count;
-    memcpy(prev_consumer_slots, curr_slots, curr_slot_count);
+    if (curr_slot_count > 0U) {
+        memcpy(prev_consumer_slots, curr_slots, curr_slot_count);
+    }
 }
 
 static void process_consumer_usage_set(const uint16_t *usages, size_t usage_count) {
@@ -1483,6 +1668,27 @@ static void process_consumer_usage_set(const uint16_t *usages, size_t usage_coun
         }
     }
     process_consumer_slot_set(curr_slots, curr_slot_count);
+}
+
+static void release_all_target_inputs(void) {
+    struct hogp_target_state *previous_target = active_target_ptr;
+
+    for (uint8_t i = 0U; i < MAX_ACTIVE_TARGETS; i++) {
+        if (!target_slots[i].conn) {
+            continue;
+        }
+        active_target_ptr = &target_slots[i];
+        process_keyboard_usage_set(NULL, 0U);
+        process_consumer_slot_set(NULL, 0U);
+        if (prev_pointer_buttons != 0U) {
+            prev_pointer_buttons = 0U;
+            if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_USE_INPUT_LISTENER)) {
+                (void)zmk_hogp_proxy_pointer_event_ex(0, 0, 0, 0,
+                                                       aggregate_pointer_buttons(0U));
+            }
+        }
+    }
+    active_target_ptr = previous_target;
 }
 
 static void update_descriptor_keyboard_state(uint8_t sub_idx, const uint8_t *usages,
@@ -1599,9 +1805,11 @@ static void process_mouse_report(const uint8_t *report, size_t report_len) {
     wheel = (report_len >= 4U) ? (int8_t)report[3] : 0;
 
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_USE_INPUT_LISTENER)) {
-        int err = zmk_hogp_proxy_pointer_event_ex((int16_t)x, (int16_t)y, 0, (int16_t)wheel, buttons);
+        int err = zmk_hogp_proxy_pointer_event_ex((int16_t)x, (int16_t)y, 0, (int16_t)wheel,
+                                                  aggregate_pointer_buttons(buttons));
         if (err == -ENOTSUP) {
-            err = zmk_hogp_proxy_pointer_event((int16_t)x, (int16_t)y, wheel, buttons);
+            err = zmk_hogp_proxy_pointer_event((int16_t)x, (int16_t)y, wheel,
+                                               aggregate_pointer_buttons(buttons));
         }
         if (err == 0) {
             prev_pointer_buttons = buttons;
@@ -1611,7 +1819,8 @@ static void process_mouse_report(const uint8_t *report, size_t report_len) {
         return;
     }
 
-    if (zmk_hogp_proxy_pointer_event((int16_t)x, (int16_t)y, wheel, buttons) == 0) {
+    if (zmk_hogp_proxy_pointer_event((int16_t)x, (int16_t)y, wheel,
+                                     aggregate_pointer_buttons(buttons)) == 0) {
         prev_pointer_buttons = buttons;
         return;
     }
@@ -1620,7 +1829,7 @@ static void process_mouse_report(const uint8_t *report, size_t report_len) {
         bool prev = (prev_pointer_buttons & BIT(bit)) != 0U;
         bool curr = (buttons & BIT(bit)) != 0U;
         if (prev != curr) {
-            (void)zmk_hogp_proxy_kscan_inject(0, (uint16_t)(POINTER_SLOT_BASE + bit), curr);
+            (void)inject_held_position(0, (uint16_t)(POINTER_SLOT_BASE + bit), curr);
         }
     }
     prev_pointer_buttons = buttons;
@@ -1649,7 +1858,8 @@ static void process_pointer_9byte_report(const uint8_t *report, size_t report_le
     hwheel = (int16_t)sys_get_le16(&report[7]);
 
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_USE_INPUT_LISTENER)) {
-        int err = zmk_hogp_proxy_pointer_event_ex(dx, dy, hwheel, wheel, buttons);
+        int err = zmk_hogp_proxy_pointer_event_ex(dx, dy, hwheel, wheel,
+                                                  aggregate_pointer_buttons(buttons));
         if (err == 0) {
             prev_pointer_buttons = buttons;
         } else if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_DEBUG_LOG)) {
@@ -1662,7 +1872,7 @@ static void process_pointer_9byte_report(const uint8_t *report, size_t report_le
         bool prev = (prev_pointer_buttons & BIT(bit)) != 0U;
         bool curr = (buttons & BIT(bit)) != 0U;
         if (prev != curr) {
-            (void)zmk_hogp_proxy_kscan_inject(0, (uint16_t)(POINTER_SLOT_BASE + bit), curr);
+            (void)inject_held_position(0, (uint16_t)(POINTER_SLOT_BASE + bit), curr);
         }
     }
     prev_pointer_buttons = buttons;
@@ -1714,7 +1924,8 @@ static void process_decoded_pointer(const struct hogp_hid_decoded_report *decode
     int16_t hwheel = (int16_t)CLAMP(decoded->hwheel, INT16_MIN, INT16_MAX);
 
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_USE_INPUT_LISTENER)) {
-        int err = zmk_hogp_proxy_pointer_event_ex(dx, dy, hwheel, wheel, buttons);
+        int err = zmk_hogp_proxy_pointer_event_ex(dx, dy, hwheel, wheel,
+                                                  aggregate_pointer_buttons(buttons));
         if (err == 0) {
             prev_pointer_buttons = buttons;
         } else if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_DEBUG_LOG)) {
@@ -1727,7 +1938,7 @@ static void process_decoded_pointer(const struct hogp_hid_decoded_report *decode
         bool prev = (prev_pointer_buttons & BIT(bit)) != 0U;
         bool curr = (buttons & BIT(bit)) != 0U;
         if (prev != curr) {
-            (void)zmk_hogp_proxy_kscan_inject(0, (uint16_t)(POINTER_SLOT_BASE + bit), curr);
+            (void)inject_held_position(0, (uint16_t)(POINTER_SLOT_BASE + bit), curr);
         }
     }
     prev_pointer_buttons = buttons;
@@ -1877,11 +2088,14 @@ static int clear_non_target_bonds(void) {
 
 static uint8_t notify_cb(struct bt_conn *conn, struct bt_gatt_subscribe_params *params,
                          const void *data, uint16_t length) {
+    struct hogp_target_state *previous_target = active_target_ptr;
+    struct hogp_target_state *notification_target = find_target_slot_by_conn(conn);
     uint8_t sub_idx = 0xFF;
 
-    if (conn != default_conn) {
+    if (!notification_target) {
         return BT_GATT_ITER_STOP;
     }
+    active_target_ptr = notification_target;
 
     for (uint8_t i = 0; i < report_sub_count; i++) {
         if (params == &subscribe_params[i]) {
@@ -1892,11 +2106,18 @@ static uint8_t notify_cb(struct bt_conn *conn, struct bt_gatt_subscribe_params *
 
     if (!data) {
         LOG_INF("Notification stopped (sub=%u, vh=0x%04x)", sub_idx, params->value_handle);
+        active_target_ptr = previous_target;
         return BT_GATT_ITER_STOP;
     }
 
     LOG_INF("HID Input notify: sub=%u vh=0x%04x len=%u", sub_idx, params->value_handle, length);
     LOG_HEXDUMP_INF(data, length, "HID Input");
+
+    if (!input_passthrough_enabled) {
+        LOG_DBG("HID input held while device manager is open");
+        active_target_ptr = previous_target;
+        return BT_GATT_ITER_CONTINUE;
+    }
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     if (!target_ready_announced) {
@@ -1911,6 +2132,7 @@ static uint8_t notify_cb(struct bt_conn *conn, struct bt_gatt_subscribe_params *
     candidate_index = 0;
 
     handle_input_report_bytes(data, length, sub_idx);
+    active_target_ptr = previous_target;
     return BT_GATT_ITER_CONTINUE;
 }
 
@@ -1929,6 +2151,10 @@ static void finish_report_discovery(void) {
 
     LOG_INF("HID discovery complete (subscriptions=%u, map=%s)", report_sub_count,
             report_map_valid ? "parsed" : "fallback");
+    int registry_err = target_registry_add(&target_addr, target_name_valid ? target_name : NULL);
+    if (registry_err) {
+        LOG_WRN("Failed to save target in device registry (%d)", registry_err);
+    }
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
     zmk_hogp_sniffer_type_text_line(screen_emit_usage_state, "target ready");
     zmk_hogp_sniffer_type_text_line(screen_emit_usage_state, "input stream on");
@@ -1948,10 +2174,12 @@ static void queue_pending_subscription(bool report_ref_valid, uint8_t report_id,
 static void subscribe_complete_cb(struct bt_conn *conn, uint8_t err,
                                   struct bt_gatt_subscribe_params *params) {
     uint8_t sub_idx = 0xFFU;
+    struct hogp_target_state *target = find_target_slot_by_conn(conn);
 
-    if (conn != default_conn) {
+    if (!target) {
         return;
     }
+    active_target_ptr = target;
 
     for (uint8_t i = 0U; i < report_sub_count; i++) {
         if (params == &subscribe_params[i]) {
@@ -2058,9 +2286,11 @@ static uint8_t report_ref_read_cb(struct bt_conn *conn, uint8_t err,
                                   uint16_t length) {
     ARG_UNUSED(params);
 
-    if (conn != default_conn) {
+    struct hogp_target_state *target = find_target_slot_by_conn(conn);
+    if (!target) {
         return BT_GATT_ITER_STOP;
     }
+    active_target_ptr = target;
 
     if (err || !data || length < 2U) {
         LOG_WRN("Report Reference read failed for vh=0x%04x (att=%u len=%u)",
@@ -2079,9 +2309,11 @@ static uint8_t discover_report_descriptor_cb(struct bt_conn *conn,
                                               struct bt_gatt_discover_params *params) {
     ARG_UNUSED(params);
 
-    if (conn != default_conn) {
+    struct hogp_target_state *target = find_target_slot_by_conn(conn);
+    if (!target) {
         return BT_GATT_ITER_STOP;
     }
+    active_target_ptr = target;
 
     if (attr) {
         if (bt_uuid_cmp(attr->uuid, &ccc_uuid.uuid) == 0) {
@@ -2204,9 +2436,11 @@ static uint8_t report_map_read_cb(struct bt_conn *conn, uint8_t err,
                                   uint16_t length) {
     ARG_UNUSED(params);
 
-    if (conn != default_conn) {
+    struct hogp_target_state *target = find_target_slot_by_conn(conn);
+    if (!target) {
         return BT_GATT_ITER_STOP;
     }
+    active_target_ptr = target;
 
     if (err) {
         LOG_WRN("Report Map read failed (att=%u); fixed-format fallback remains active", err);
@@ -2327,9 +2561,11 @@ static uint8_t discover_hids_characteristic_cb(struct bt_conn *conn,
                                                struct bt_gatt_discover_params *params) {
     ARG_UNUSED(params);
 
-    if (conn != default_conn) {
+    struct hogp_target_state *target = find_target_slot_by_conn(conn);
+    if (!target) {
         return BT_GATT_ITER_STOP;
     }
+    active_target_ptr = target;
 
     if (!attr) {
         finish_hids_characteristic_discovery(conn, "ATT range complete");
@@ -2387,9 +2623,11 @@ static uint8_t discover_hids_cb(struct bt_conn *conn, const struct bt_gatt_attr 
     const struct bt_gatt_service_val *svc;
     ARG_UNUSED(params);
 
-    if (conn != default_conn) {
+    struct hogp_target_state *target = find_target_slot_by_conn(conn);
+    if (!target) {
         return BT_GATT_ITER_STOP;
     }
+    active_target_ptr = target;
 
     if (!attr) {
         LOG_ERR("HID service not found");
@@ -2468,13 +2706,13 @@ static int discover_hids(struct bt_conn *conn) {
 
 static void connected_cb(struct bt_conn *conn, uint8_t err) {
     int derr;
-    bt_security_t wanted_sec = get_desired_security_level();
+    struct hogp_target_state *target = find_target_slot_by_conn(conn);
     const bt_addr_le_t *peer = bt_conn_get_dst(conn);
     struct bt_conn_info info = {0};
     int info_err = bt_conn_get_info(conn, &info);
     bool is_peripheral = (info_err == 0 && info.role == BT_CONN_ROLE_PERIPHERAL);
 
-    if (conn != default_conn) {
+    if (!target) {
         if (!err && is_peripheral) {
             host_connected = true;
             LOG_INF("Host PC connected");
@@ -2484,6 +2722,8 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
         }
         return;
     }
+    active_target_ptr = target;
+    bt_security_t wanted_sec = get_desired_security_level();
 
     connecting = false;
 
@@ -2517,7 +2757,7 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
         return;
     }
 
-    LOG_INF("Connected to target");
+    LOG_INF("Connected to target slot %u", target_slot_number(target));
     if (info_err == 0 && info.type == BT_CONN_TYPE_LE) {
         uint32_t interval_ms_x100 = (uint32_t)info.le.interval * 125U;
         LOG_INF("Target conn params initial: interval=%u (%u.%02u ms), latency=%u, "
@@ -2526,7 +2766,7 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
                 info.le.latency, (uint32_t)info.le.timeout * 10U);
     }
     security_failure_latched = false;
-    screen_typing_enabled = false;
+    screen_typing_enabled = picker_menu_active;
     if (sec_policy_cycle_active) {
         LOG_WRN("Using security policy step L%u", (uint32_t)wanted_sec);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
@@ -2632,26 +2872,33 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
 }
 
 static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
+    struct hogp_target_state *previous_target = active_target_ptr;
+    struct hogp_target_state *target = find_target_slot_by_conn(conn);
     const bt_addr_le_t *peer = bt_conn_get_dst(conn);
     struct bt_conn_info info = {0};
     bool is_peripheral = (bt_conn_get_info(conn, &info) == 0 && info.role == BT_CONN_ROLE_PERIPHERAL);
 
-    if (conn != default_conn) {
-    if (is_peripheral) {
-        host_connected = false;
-        LOG_INF("Host PC disconnected (reason 0x%02x)", reason);
+    if (!target) {
+        if (is_peripheral) {
+            host_connected = false;
+            LOG_INF("Host PC disconnected (reason 0x%02x)", reason);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-        zmk_hogp_sniffer_screen_log_verbose_code(screen_emit_usage_state, "host disc", reason);
+            zmk_hogp_sniffer_screen_log_verbose_code(screen_emit_usage_state, "host disc", reason);
 #endif
-    }
+        }
         return;
     }
+    active_target_ptr = target;
+    bool was_discovering = gatt_discovery_started;
 
-    LOG_INF("Disconnected (reason 0x%02x: %s)", reason,
-            zmk_hogp_sniffer_hci_reason_to_str(reason));
-    k_work_cancel_delayable(&hid_discovery_work);
-    pending_gatt_stage = HOGP_GATT_STAGE_NONE;
-    k_work_cancel_delayable(&gatt_stage_work);
+    LOG_INF("Target slot %u disconnected (reason 0x%02x: %s)", target_slot_number(target),
+            reason, zmk_hogp_sniffer_hci_reason_to_str(reason));
+    if (was_discovering) {
+        k_work_cancel_delayable(&hid_discovery_work);
+        pending_gatt_stage = HOGP_GATT_STAGE_NONE;
+        k_work_cancel_delayable(&gatt_stage_work);
+    }
+    gatt_discovery_started = false;
     if (reason == BT_HCI_ERR_CONN_FAIL_TO_ESTAB || reason == BT_HCI_ERR_REMOTE_USER_TERM_CONN ||
         reason == BT_HCI_ERR_CONN_TIMEOUT) {
         next_connect_allowed_ms = k_uptime_get() + 10000;
@@ -2667,8 +2914,8 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
     clear_default_conn_ref();
 
     for (size_t i = 0; i < prev_consumer_slot_count; i++) {
-        (void)zmk_hogp_proxy_kscan_inject(0, (uint16_t)(CONSUMER_SLOT_BASE + prev_consumer_slots[i]),
-                                          false);
+        (void)inject_held_position(0, (uint16_t)(CONSUMER_SLOT_BASE + prev_consumer_slots[i]),
+                                   false);
     }
 
     memset(subscribe_params, 0, sizeof(subscribe_params));
@@ -2691,18 +2938,33 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
     pending_report_value_handle = 0;
     prev_consumer_slot_count = 0;
     memset(prev_consumer_slots, 0, sizeof(prev_consumer_slots));
+    if (prev_pointer_buttons != 0U &&
+        IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_USE_INPUT_LISTENER)) {
+        (void)zmk_hogp_proxy_pointer_event_ex(0, 0, 0, 0, aggregate_pointer_buttons(0U));
+    }
     prev_pointer_buttons = 0;
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)) {
+    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS) &&
+        !IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_EMIT_POSITION_EVENTS)) {
         for (size_t i = 0; i < prev_usage_count; i++) {
             emit_usage_state(prev_usages[i], false);
         }
     }
 #endif
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_EMIT_POSITION_EVENTS)
+    if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_EMIT_POSITION_EVENTS)) {
+        for (size_t i = 0; i < prev_usage_count; i++) {
+            uint16_t row, col;
+            if (usage_to_row_col(prev_usages[i], &row, &col)) {
+                (void)inject_held_position(row, col, false);
+            }
+        }
+    }
+#endif
     prev_usage_count = 0;
     security_failure_latched = false;
-    screen_typing_enabled = true;
+    screen_typing_enabled = picker_menu_active;
     apply_host_adv_policy(should_wait_for_host() ? true : false);
 
     if (reconnect_fail_count < UINT8_MAX) {
@@ -2715,14 +2977,20 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
         return;
     }
 
-    (void)try_next_candidate_or_rescan();
+    selected_target_valid = false;
+    target_hid_verified = false;
+    if (previous_target != target && previous_target->conn) {
+        active_target_ptr = previous_target;
+    }
+    LOG_INF("Manual connection mode: press D0 to reload and D3 to reconnect");
 }
 
 static void le_param_updated_cb(struct bt_conn *conn, uint16_t interval, uint16_t latency,
                                 uint16_t timeout) {
     uint32_t interval_ms_x100 = (uint32_t)interval * 125U;
+    struct hogp_target_state *target = find_target_slot_by_conn(conn);
 
-    if (conn != default_conn) {
+    if (!target) {
         return;
     }
 
@@ -2733,8 +3001,9 @@ static void le_param_updated_cb(struct bt_conn *conn, uint16_t interval, uint16_
 
 static bool le_param_req_cb(struct bt_conn *conn, struct bt_le_conn_param *param) {
     uint16_t requested_timeout;
+    struct hogp_target_state *target = find_target_slot_by_conn(conn);
 
-    if (conn != default_conn) {
+    if (!target) {
         return true;
     }
 
@@ -2757,11 +3026,13 @@ static bool le_param_req_cb(struct bt_conn *conn, struct bt_le_conn_param *param
 }
 
 static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum bt_security_err err) {
-    bt_security_t wanted_sec = get_desired_security_level();
+    struct hogp_target_state *target = find_target_slot_by_conn(conn);
 
-    if (conn != default_conn) {
+    if (!target) {
         return;
     }
+    active_target_ptr = target;
+    bt_security_t wanted_sec = get_desired_security_level();
 
     if (err) {
         if (security_failure_latched) {
@@ -2800,12 +3071,19 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
 }
 
 static void pairing_complete_cb(struct bt_conn *conn, bool bonded) {
-    ARG_UNUSED(conn);
+    struct hogp_target_state *target = find_target_slot_by_conn(conn);
+    if (target) {
+        active_target_ptr = target;
+    }
     LOG_INF("Pairing complete (bonded=%u)", bonded ? 1U : 0U);
 }
 
 static void pairing_failed_cb(struct bt_conn *conn, enum bt_security_err reason) {
-    ARG_UNUSED(conn);
+    struct hogp_target_state *target = find_target_slot_by_conn(conn);
+    if (!target) {
+        return;
+    }
+    active_target_ptr = target;
     if (security_failure_latched) {
         return;
     }
@@ -3012,25 +3290,20 @@ static bool ad_contains_split_service_uuid(const struct net_buf_simple *ad) {
     return found;
 }
 
+static bool adv_type_can_connect(uint8_t adv_type) {
+    /* An active scan reports scan responses separately. They often contain
+     * the device name, but are not themselves valid LE Create Connection
+     * targets. Wait for a connectable advertising packet from that address.
+     */
+    return adv_type == BT_GAP_ADV_TYPE_ADV_IND ||
+           adv_type == BT_GAP_ADV_TYPE_ADV_DIRECT_IND;
+}
+
 static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
                     struct net_buf_simple *ad) {
     char addr_str[BT_ADDR_LE_STR_LEN];
     char name[PICKER_NAME_MAX];
     bool has_name = false;
-    bool auto_select_match = false;
-    const char *auto_select_name_substr = "";
-    const char *target1_name_substr = "";
-    const char *target2_name_substr = "";
-    const char *matched_name_substr = NULL;
-#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_AUTO_SELECT_NAME_CONTAINS)
-    auto_select_name_substr = CONFIG_ZMK_BLE_HOGP_SNIFFER_AUTO_SELECT_NAME_CONTAINS;
-#endif
-#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET1_NAME_CONTAINS)
-    target1_name_substr = CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET1_NAME_CONTAINS;
-#endif
-#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET2_NAME_CONTAINS)
-    target2_name_substr = CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET2_NAME_CONTAINS;
-#endif
 
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_SCAN_EVENTS)) {
         bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
@@ -3057,37 +3330,13 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
 
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_BUTTON_SELECTOR) && !selected_target_valid) {
         if (has_name) {
-            if (auto_select_name_substr[0] != '\0' &&
-                ascii_contains_case_insensitive(name, auto_select_name_substr)) {
-                matched_name_substr = auto_select_name_substr;
-            } else if (target1_name_substr[0] != '\0' &&
-                       ascii_contains_case_insensitive(name, target1_name_substr)) {
-                matched_name_substr = target1_name_substr;
-            } else if (target2_name_substr[0] != '\0' &&
-                       ascii_contains_case_insensitive(name, target2_name_substr)) {
-                matched_name_substr = target2_name_substr;
-            }
-            auto_select_match = (matched_name_substr != NULL);
-            if (auto_select_match) {
-                bt_addr_le_copy(&target_addr, addr);
-                target_match_any_type = true;
-                target_any_addr = false;
-                selected_target_valid = true;
-                strncpy(target_name, name, sizeof(target_name) - 1U);
-                target_name[sizeof(target_name) - 1U] = '\0';
-                target_name_valid = (target_name[0] != '\0');
-                (void)save_persisted_target_addr(&target_addr);
-                (void)save_persisted_target_meta(target_sec_level_hint, target_name, target_name_valid);
-                LOG_INF("Auto-selected target by name match (%s): %s", matched_name_substr,
-                        target_name);
-            }
             picker_add_or_update(addr, name, rssi);
         } else {
-            picker_unknown_add_or_update(addr);
+            snprintf(name, sizeof(name), "UNKNOWN%02x%02x%02x", addr->a.val[2], addr->a.val[1],
+                     addr->a.val[0]);
+            picker_add_or_update(addr, name, rssi);
         }
-        if (!auto_select_match) {
-            return;
-        }
+        return;
     }
 
     if (!target_any_addr) {
@@ -3111,7 +3360,21 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
             if (!name_match) {
                 return;
             }
+
+            /* A bonded privacy device may advertise under a refreshed RPA.
+             * Remember the address found in its name-bearing scan response,
+             * then connect only after its connectable ADV packet arrives.
+             */
+            bt_addr_le_copy(&target_addr, addr);
+            target_match_any_type = true;
         }
+    }
+
+    if (!adv_type_can_connect(adv_type)) {
+        LOG_DBG("Matched target in non-connectable advertising packet type=%u; waiting for "
+                "connectable packet",
+                adv_type);
+        return;
     }
 
     if (candidate_list_contains(addr)) {
@@ -3374,9 +3637,14 @@ static void scan_cycle_work_handler(struct k_work *work) {
     }
 
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_BUTTON_SELECTOR) && !selected_target_valid) {
-        LOG_INF("Picker scan running: devices=%u selected=%u", picker_device_count,
-                (uint8_t)(picker_selected_index + 1U));
-        k_work_schedule(&scan_cycle_work, K_MSEC(CONFIG_ZMK_BLE_HOGP_SNIFFER_SCAN_CYCLE_MS));
+        err = bt_le_scan_stop();
+        if (err && err != -EALREADY) {
+            LOG_WRN("Picker scan stop failed (%d)", err);
+        }
+        scanning = false;
+        LOG_INF("Picker scan complete: devices=%u selected=%u", picker_device_count,
+                picker_device_count == 0U ? 0U : (uint8_t)(picker_selected_index + 1U));
+        picker_print_list();
         return;
     }
 
@@ -3491,7 +3759,46 @@ static void picker_button_work_handler(struct k_work *work) {
         }
 
         switch (idx) {
-        case 0: /* Up */
+        case 0: /* Reload target list */
+            if (connecting || gatt_discovery_started) {
+                LOG_WRN("Device list reload deferred: target setup is still in progress");
+                break;
+            }
+            release_all_target_inputs();
+            picker_menu_active = true;
+            input_passthrough_enabled = false;
+            screen_typing_enabled = true;
+            {
+                struct hogp_target_state *free_target = find_free_target_slot();
+                if (!free_target) {
+                    LOG_WRN("All %u target slots are connected; reset one before adding another",
+                            MAX_ACTIVE_TARGETS);
+                    picker_print_list();
+                    break;
+                }
+                active_target_ptr = free_target;
+                memset(free_target, 0, sizeof(*free_target));
+            }
+            picker_device_count = 0U;
+            picker_unknown_count = 0U;
+            picker_selected_index = 0U;
+            selected_target_valid = false;
+            memset(picker_devices, 0, sizeof(picker_devices));
+            memset(picker_unknown_addrs, 0, sizeof(picker_unknown_addrs));
+            picker_load_saved_and_connected_devices();
+            LOG_INF("Device list reload requested");
+            if (scanning) {
+                (void)bt_le_scan_stop();
+                scanning = false;
+                k_work_cancel_delayable(&scan_cycle_work);
+            }
+            if (!connecting) {
+                (void)start_scan();
+            }
+            picker_print_list();
+            break;
+
+        case 1: /* Up */
             if (items > 0U) {
                 if (picker_selected_index == 0U) {
                     picker_selected_index = (uint8_t)(items - 1U);
@@ -3502,77 +3809,45 @@ static void picker_button_work_handler(struct k_work *work) {
             picker_announce_current("sel");
             break;
 
-        case 1: /* Down */
+        case 2: /* Down */
             if (items > 0U) {
                 picker_selected_index = (uint8_t)((picker_selected_index + 1U) % items);
             }
             picker_announce_current("sel");
             break;
 
-        case 2: /* OK */
-            if (picker_selected_index == 0U) {
-                LOG_INF("Running full connection reset");
-                bt_foreach_bond(BT_ID_DEFAULT, clear_all_bonds_cb, NULL);
-                (void)settings_delete("ble_hogp_sniffer/target_addr");
-                (void)settings_delete("ble_hogp_sniffer/target_meta");
-
-                picker_name_probe_active = false;
-                picker_probe_count = 0;
-                picker_probe_pos = 0;
-                picker_probe_addr_valid = false;
-                picker_unknown_count = 0;
-                k_work_cancel_delayable(&picker_probe_timeout_work);
-                selected_target_valid = false;
-                target_any_addr = false;
-                target_hid_verified = false;
-                target_name[0] = '\0';
-                target_name_valid = false;
-                target_sec_hint_valid = false;
-                sec_policy_cycle_active = false;
-                sec_policy_try_idx = 0U;
-                last_sec_policy_step_ms = 0;
-                reconnect_fail_count = 0;
-                in_candidate_sequence = false;
-                candidate_count = 0;
-                candidate_index = 0;
-                picker_device_count = 0;
-                picker_selected_index = 0;
-                memset(picker_unknown_addrs, 0, sizeof(picker_unknown_addrs));
-                memset(candidate_addrs, 0, sizeof(candidate_addrs));
-
-                if (default_conn) {
-                    (void)bt_conn_disconnect(default_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-                } else {
-                    apply_host_adv_policy(should_wait_for_host() ? true : false);
-                    (void)start_scan();
-                }
-                picker_announce_current("reset");
+        case 3: /* Connect selected device */
+            if (items == 0U) {
+                picker_announce_current("empty");
                 break;
             }
-
-            if (picker_selected_index == 1U) {
-                if (default_conn || connecting) {
-                    picker_announce_current("busy");
-                    break;
-                }
-                picker_begin_name_probe();
+            if (picker_device_is_connected(&picker_devices[picker_selected_index].addr)) {
+                picker_announce_current("connected");
                 break;
             }
-
-            if (default_conn || connecting) {
+            if (connecting || gatt_discovery_started) {
                 picker_announce_current("busy");
                 break;
             }
+            if (default_conn) {
+                struct hogp_target_state *free_target = find_free_target_slot();
+                if (!free_target) {
+                    picker_announce_current("slots full");
+                    break;
+                }
+                active_target_ptr = free_target;
+                memset(free_target, 0, sizeof(*free_target));
+            }
 
             {
-                const char *new_name = picker_devices[picker_selected_index - 2U].name;
+                const char *new_name = picker_devices[picker_selected_index].name;
                 bool same_name = (target_name_valid && strcmp(target_name, new_name) == 0);
                 if (!same_name) {
                     target_sec_hint_valid = false;
                 }
             }
-            bt_addr_le_copy(&target_addr, &picker_devices[picker_selected_index - 2U].addr);
-            strncpy(target_name, picker_devices[picker_selected_index - 2U].name,
+            bt_addr_le_copy(&target_addr, &picker_devices[picker_selected_index].addr);
+            strncpy(target_name, picker_devices[picker_selected_index].name,
                     sizeof(target_name) - 1U);
             target_name[sizeof(target_name) - 1U] = '\0';
             target_name_valid = (target_name[0] != '\0');
@@ -3594,32 +3869,103 @@ static void picker_button_work_handler(struct k_work *work) {
             (void)start_scan();
             break;
 
-        case 3: /* Back */
-            picker_name_probe_active = false;
-            picker_probe_count = 0;
-            picker_probe_pos = 0;
-            picker_probe_addr_valid = false;
+        case 4: /* Reset selected device */
+            if (items == 0U) {
+                picker_announce_current("empty");
+                break;
+            }
+            {
+                const bt_addr_le_t *addr = &picker_devices[picker_selected_index].addr;
+                struct bt_conn *conn = bt_conn_lookup_addr_le(BT_ID_DEFAULT, addr);
+                if (!conn) {
+                    for (uint8_t i = 0U; i < MAX_ACTIVE_TARGETS; i++) {
+                        if (target_slots[i].conn &&
+                            bt_addr_eq(&target_slots[i].addr.a, &addr->a)) {
+                            conn = bt_conn_ref(target_slots[i].conn);
+                            break;
+                        }
+                    }
+                }
+                if (conn) {
+                    (void)bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+                    bt_conn_unref(conn);
+                }
+                int err = bt_unpair(BT_ID_DEFAULT, addr);
+                int registry_err = target_registry_remove(addr);
+                LOG_INF("Selected device reset #%u %s (%d)",
+                        (uint32_t)(picker_selected_index + 1U),
+                        picker_devices[picker_selected_index].name, err);
+                if (registry_err && registry_err != -ENOENT) {
+                    LOG_WRN("Failed to remove selected device registry entry (%d)", registry_err);
+                }
+            }
+            picker_print_list();
+            break;
+
+        case 5: /* Reset all input-device settings; preserve host profiles */
+            LOG_INF("Resetting all input-device bonds/settings; preserving host profiles");
+            release_all_target_inputs();
+            picker_menu_active = true;
+            input_passthrough_enabled = false;
+            screen_typing_enabled = true;
+            if (scanning) {
+                (void)bt_le_scan_stop();
+                scanning = false;
+            }
+            k_work_cancel_delayable(&scan_cycle_work);
+            k_work_cancel_delayable(&reconnect_work);
+            k_work_cancel_delayable(&candidate_connect_work);
             k_work_cancel_delayable(&picker_probe_timeout_work);
+            k_work_cancel_delayable(&hid_discovery_work);
+            k_work_cancel_delayable(&gatt_stage_work);
+            in_candidate_sequence = false;
+            candidate_count = 0U;
+            candidate_index = 0U;
+            picker_name_probe_active = false;
+            for (uint8_t i = 0U; i < MAX_ACTIVE_TARGETS; i++) {
+                if (target_slots[i].conn) {
+                    (void)bt_conn_disconnect(target_slots[i].conn,
+                                             BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+                }
+                if (target_slots[i].selected_valid) {
+                    int err = bt_unpair(BT_ID_DEFAULT, &target_slots[i].addr);
+                    if (err && err != -ENOENT) {
+                        LOG_WRN("Failed to clear connected input bond slot %u (%d)",
+                                (uint32_t)(i + 1U), err);
+                    }
+                }
+            }
+            for (uint8_t i = 0U; i < target_registry.count; i++) {
+                bt_addr_le_t addr = {.type = target_registry.targets[i].type};
+                memcpy(addr.a.val, target_registry.targets[i].a, sizeof(addr.a.val));
+                int err = bt_unpair(BT_ID_DEFAULT, &addr);
+                if (err && err != -ENOENT) {
+                    LOG_WRN("Failed to clear registered input bond %u (%d)",
+                            (uint32_t)(i + 1U), err);
+                }
+            }
+            (void)settings_delete("ble_hogp_sniffer/target_addr");
+            (void)settings_delete("ble_hogp_sniffer/target_meta");
+            (void)settings_delete("ble_hogp_sniffer/devices");
+            memset(&target_registry, 0, sizeof(target_registry));
             selected_target_valid = false;
             target_hid_verified = false;
             target_name[0] = '\0';
             target_name_valid = false;
             target_sec_hint_valid = false;
-            sec_policy_cycle_active = false;
-            sec_policy_try_idx = 0U;
-            last_sec_policy_step_ms = 0;
-            in_candidate_sequence = false;
-            candidate_count = 0;
-            candidate_index = 0;
-            picker_selected_index = 0;
-            memset(candidate_addrs, 0, sizeof(candidate_addrs));
-            picker_announce_current("back");
-            if (default_conn) {
-                (void)bt_conn_disconnect(default_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-            } else {
-                apply_host_adv_policy(should_wait_for_host() ? true : false);
-                (void)start_scan();
-            }
+            picker_device_count = 0U;
+            picker_unknown_count = 0U;
+            picker_selected_index = 0U;
+            memset(picker_devices, 0, sizeof(picker_devices));
+            memset(picker_unknown_addrs, 0, sizeof(picker_unknown_addrs));
+            picker_print_list();
+            break;
+
+        case 6: /* Exit menu and pass connected HID input through */
+            picker_menu_active = false;
+            input_passthrough_enabled = true;
+            screen_typing_enabled = false;
+            LOG_INF("Device manager closed; HID input passthrough enabled");
             break;
 
         default:
@@ -3636,7 +3982,7 @@ int zmk_hogp_sniffer_button_event(uint8_t idx, bool pressed) {
         return -ENOTSUP;
     }
 
-    if (idx > 3U) {
+    if (idx > 6U) {
         return -EINVAL;
     }
 
@@ -3750,21 +4096,26 @@ static int ble_hogp_sniffer_init(void) {
         if (merr) {
             LOG_WRN("Persisted target meta load failed (%d)", merr);
         }
-        selected_target_valid = loaded;
+        /* Saved metadata is used only for marks/security hints. Connections
+         * are initiated explicitly with D3 in device-manager mode.
+         */
+        selected_target_valid = false;
         target_sec_hint_valid = mloaded;
         picker_device_count = 0;
         picker_unknown_count = 0;
         picker_selected_index = 0;
+        picker_load_saved_and_connected_devices();
         if (loaded) {
             target_any_addr = false;
             target_match_any_type = true;
-            LOG_INF("Button selector mode: restored last target%s", target_name_valid ? " by name" : "");
+            LOG_INF("Device manager: saved target metadata loaded; waiting for D3 connect");
         } else {
             memset(&target_addr, 0, sizeof(target_addr));
             target_name[0] = '\0';
             target_name_valid = false;
             target_sec_hint_valid = false;
-            LOG_INF("Button selector mode enabled (Up/Down/OK/Back)");
+            LOG_INF("Device manager enabled (D0 reload, D1 up, D2 down, D3 connect, "
+                    "D4 reset selected, D5 reset all inputs, D6 exit)");
         }
     } else {
         err = parse_target_addr();
@@ -3778,6 +4129,8 @@ static int ble_hogp_sniffer_init(void) {
     memset(prev_consumer_slots, 0, sizeof(prev_consumer_slots));
     target_hid_verified = false;
     screen_typing_enabled = true;
+    picker_menu_active = IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_BUTTON_SELECTOR);
+    input_passthrough_enabled = !picker_menu_active;
     next_connect_allowed_ms = 0;
     sec_policy_cycle_active = false;
     sec_policy_try_idx = 0U;

@@ -18,4 +18,4 @@ properties:
   input-gpios:
     type: phandle-array
     required: true
-    description: GPIO inputs for external tact switches (P0..P3)
+    description: Seven GPIO inputs for the external device-manager switches
