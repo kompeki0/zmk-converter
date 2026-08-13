@@ -51,18 +51,37 @@ After flashing and booting this reset firmware once, flash your normal firmware 
 west flash
 ```
 
+## Button selector operation
+
+Connect four normally-open buttons between the XIAO pins and GND. Internal pull-ups are enabled:
+
+- `D0` (`P0.02`): Up
+- `D1` (`P0.03`): Down
+- `D2` (`P0.28`): OK
+- `D3` (`P0.29`): Back/disconnect
+
+Put the target keyboard into pairing mode, then wait for `Found candidate ...` in the serial log.
+If its advertised name contains `AUTO_SELECT_NAME_CONTAINS`, `TARGET1_NAME_CONTAINS`, or
+`TARGET2_NAME_CONTAINS` (case-insensitive), it is selected and connected automatically; no button
+operation is needed. The buttons are the fallback for other devices.
+The initial selection is `RESETALL`; press Down twice to reach the first named device, checking the
+`sel ...` log after each press, then press OK. If the device has no advertised name, select
+`OTHER(n)` with one Down press and press OK to probe its GATT device name. `RESETALL` + OK clears
+all target bonds and saved selection, so do not select it during an ordinary connection.
+
 ## Expected logs
 Successful flow (wording can vary slightly):
 1. `Pairing compatibility: Legacy + Secure Connections; host output: USB`
-2. `Scanning started`
-3. `Target candidate ... found`
-4. `Connected to target`
-5. `Pairing request from target accepted`
-6. `HID service found, discovering characteristic topology`
-7. `Report Map parsed`
-8. `Subscribed HID input`
-9. `HID discovery complete`
-10. `HID Input` hexdump lines when keys are pressed on target keyboard
+2. `Bluetooth settings loaded; identity ready`
+3. `Scanning started`
+4. `Target candidate ... found`
+5. `Connected to target`
+6. `Pairing request from target accepted`
+7. `HID service found, discovering characteristic topology`
+8. `Report Map parsed`
+9. `Subscribed HID input`
+10. `HID discovery complete`
+11. `HID Input` hexdump lines when keys are pressed on target keyboard
 
 ## Troubleshooting
 1. No `Target found, connecting`

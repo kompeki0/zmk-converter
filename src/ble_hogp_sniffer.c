@@ -2731,8 +2731,17 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
     bool has_name = false;
     bool auto_select_match = false;
     const char *auto_select_name_substr = "";
+    const char *target1_name_substr = "";
+    const char *target2_name_substr = "";
+    const char *matched_name_substr = NULL;
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_AUTO_SELECT_NAME_CONTAINS)
     auto_select_name_substr = CONFIG_ZMK_BLE_HOGP_SNIFFER_AUTO_SELECT_NAME_CONTAINS;
+#endif
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET1_NAME_CONTAINS)
+    target1_name_substr = CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET1_NAME_CONTAINS;
+#endif
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET2_NAME_CONTAINS)
+    target2_name_substr = CONFIG_ZMK_BLE_HOGP_SNIFFER_TARGET2_NAME_CONTAINS;
 #endif
 
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_LOG_SCAN_EVENTS)) {
@@ -2760,8 +2769,17 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
 
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_BUTTON_SELECTOR) && !selected_target_valid) {
         if (has_name) {
-            auto_select_match = (auto_select_name_substr[0] != '\0') &&
-                                ascii_contains_case_insensitive(name, auto_select_name_substr);
+            if (auto_select_name_substr[0] != '\0' &&
+                ascii_contains_case_insensitive(name, auto_select_name_substr)) {
+                matched_name_substr = auto_select_name_substr;
+            } else if (target1_name_substr[0] != '\0' &&
+                       ascii_contains_case_insensitive(name, target1_name_substr)) {
+                matched_name_substr = target1_name_substr;
+            } else if (target2_name_substr[0] != '\0' &&
+                       ascii_contains_case_insensitive(name, target2_name_substr)) {
+                matched_name_substr = target2_name_substr;
+            }
+            auto_select_match = (matched_name_substr != NULL);
             if (auto_select_match) {
                 bt_addr_le_copy(&target_addr, addr);
                 target_match_any_type = true;
@@ -2772,7 +2790,7 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t adv_type,
                 target_name_valid = (target_name[0] != '\0');
                 (void)save_persisted_target_addr(&target_addr);
                 (void)save_persisted_target_meta(target_sec_level_hint, target_name, target_name_valid);
-                LOG_INF("Auto-selected target by name match (%s): %s", auto_select_name_substr,
+                LOG_INF("Auto-selected target by name match (%s): %s", matched_name_substr,
                         target_name);
             }
             picker_add_or_update(addr, name, rssi);
@@ -3403,6 +3421,21 @@ static int ble_hogp_sniffer_init(void) {
         LOG_ERR("bt_enable failed (%d)", err);
         return err;
     }
+
+#if defined(CONFIG_SETTINGS) && !defined(CONFIG_ZMK_BLE)
+    /* ZMK normally loads settings from main() before its BLE stack is
+     * enabled. In central-only compatibility mode Bluetooth is enabled here,
+     * later, so load again after bt_enable() to create/restore the local
+     * identity and bonds before scanning. Otherwise bt_le_scan_start() fails
+     * with -EAGAIN and the controller reports "App must call settings_load".
+     */
+    err = settings_load();
+    if (err) {
+        LOG_ERR("Bluetooth settings load failed (%d)", err);
+        return err;
+    }
+    LOG_INF("Bluetooth settings loaded; identity ready");
+#endif
 
 #if defined(CONFIG_BT_SMP)
     err = bt_conn_auth_info_cb_register(&auth_info_cb);
