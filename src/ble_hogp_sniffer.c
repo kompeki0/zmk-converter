@@ -164,7 +164,6 @@ struct hogp_target_state {
     uint16_t pending_report_value_handle;
     bool ready_announced;
     bool security_failure_latched;
-    bool security_upgrade_attempted;
     uint8_t prev_usages[MAX_PRESSED_USAGES];
     size_t prev_usage_count;
     uint8_t prev_consumer_slots[CONSUMER_SLOT_COUNT];
@@ -208,7 +207,6 @@ static struct hogp_target_state active_target;
 #define pending_report_value_handle active_target.pending_report_value_handle
 #define target_ready_announced active_target.ready_announced
 #define security_failure_latched active_target.security_failure_latched
-#define security_upgrade_attempted active_target.security_upgrade_attempted
 #define prev_usages active_target.prev_usages
 #define prev_usage_count active_target.prev_usage_count
 #define prev_consumer_slots active_target.prev_consumer_slots
@@ -265,6 +263,10 @@ static void clear_all_bonds_cb(const struct bt_bond_info *info, void *user_data)
 static void step_security_policy_on_failure(int reason_code, const char *tag);
 static void schedule_security_disconnect(uint8_t reason, uint32_t delay_ms);
 static void clear_default_conn_ref(void);
+
+#if defined(CONFIG_BT_SMP)
+static struct bt_conn_auth_cb auth_cb;
+#endif
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
 static void emit_usage_state(uint8_t usage, bool pressed);
@@ -2262,7 +2264,6 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
 
     LOG_INF("Connected to target");
     security_failure_latched = false;
-    security_upgrade_attempted = false;
     screen_typing_enabled = false;
     if (sec_policy_cycle_active) {
         LOG_WRN("Using security policy step L%u", (uint32_t)wanted_sec);
@@ -2292,6 +2293,24 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
         }
         return;
     }
+
+#if defined(CONFIG_BT_SMP)
+    /* ZMK registers a global authentication callback for its peripheral/host
+     * role. Overlay callbacks only on this central-side target connection so
+     * keyboards that require authenticated pairing can use passkey display.
+     */
+    derr = bt_conn_auth_cb_overlay(conn, &auth_cb);
+    if (derr) {
+        LOG_ERR("Target authentication callback overlay failed (%d)", derr);
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+        zmk_hogp_sniffer_screen_log_verbose_code(screen_emit_usage_state, "auth overlay err",
+                                                 (uint32_t)(-derr));
+#endif
+        schedule_security_disconnect(BT_HCI_ERR_REMOTE_USER_TERM_CONN, 50U);
+        return;
+    }
+    LOG_INF("Target authentication callbacks installed");
+#endif
 
     if (peer) {
         target_addr = *peer;
@@ -2420,7 +2439,6 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
 #endif
     prev_usage_count = 0;
     security_failure_latched = false;
-    security_upgrade_attempted = false;
     screen_typing_enabled = true;
     apply_host_adv_policy(should_wait_for_host() ? true : false);
 
@@ -2446,25 +2464,6 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
     }
 
     if (err) {
-        bool auth_requirement = ((int)err == 4);
-#ifdef BT_SECURITY_ERR_AUTH_REQUIREMENT
-        if (err == BT_SECURITY_ERR_AUTH_REQUIREMENT) {
-            auth_requirement = true;
-        }
-#endif
-
-        if (auth_requirement && !security_upgrade_attempted && wanted_sec < BT_SECURITY_L3) {
-            bt_security_t next_sec = (wanted_sec == BT_SECURITY_L1) ? BT_SECURITY_L2 : BT_SECURITY_L3;
-            security_upgrade_attempted = true;
-            LOG_WRN("Security requires stronger level, retry in-place: L%u -> L%u",
-                    (uint32_t)wanted_sec, (uint32_t)next_sec);
-            derr = bt_conn_set_security(conn, next_sec);
-            if (derr == 0 || derr == -EALREADY) {
-                return;
-            }
-            LOG_WRN("In-place security upgrade failed (%d)", derr);
-        }
-
         if (security_failure_latched) {
             return;
         }
@@ -2490,7 +2489,6 @@ static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum 
 
     sec_policy_cycle_active = false;
     sec_policy_try_idx = 0U;
-    security_upgrade_attempted = false;
     target_sec_level_hint = (uint8_t)level;
     target_sec_hint_valid = true;
     (void)save_persisted_target_meta(target_sec_level_hint, target_name, target_name_valid);
@@ -3394,11 +3392,6 @@ static int ble_hogp_sniffer_init(void) {
     }
 
 #if defined(CONFIG_BT_SMP)
-    err = bt_conn_auth_cb_register(&auth_cb);
-    if (err && err != -EALREADY) {
-        LOG_WRN("bt_conn_auth_cb_register failed (%d)", err);
-    }
-
     err = bt_conn_auth_info_cb_register(&auth_info_cb);
     if (err && err != -EALREADY) {
         LOG_WRN("bt_conn_auth_info_cb_register failed (%d)", err);
