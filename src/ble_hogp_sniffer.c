@@ -2659,7 +2659,9 @@ static struct bt_conn_auth_info_cb auth_info_cb = {
 BT_CONN_CB_DEFINE(conn_callbacks) = {
     .connected = connected_cb,
     .disconnected = disconnected_cb,
+#if defined(CONFIG_BT_SMP)
     .security_changed = security_changed_cb,
+#endif
 };
 
 static bool ad_find_hids_uuid_cb(struct bt_data *data, void *user_data) {

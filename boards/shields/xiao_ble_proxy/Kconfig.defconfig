@@ -4,7 +4,7 @@ config ZMK_KEYBOARD_NAME
     default "XIAO Proxy"
 
 config ZMK_BLE_HOGP_SNIFFER
-    default y
+    default y if BT && BT_CENTRAL && BT_OBSERVER && BT_GATT_CLIENT
 
 config ZMK_BLE_HOGP_SNIFFER_TARGET_MAC
     default "dd:75:7b:9c:8a:1f"
