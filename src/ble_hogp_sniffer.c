@@ -17,7 +17,9 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
+#if defined(CONFIG_ZMK_BLE)
 #include <zmk/ble.h>
+#endif
 #include <zmk/event_manager.h>
 #include <zmk/split/bluetooth/uuid.h>
 #include <zmk/usb.h>
@@ -86,7 +88,9 @@ static bool in_candidate_sequence;
 static uint8_t candidate_count;
 static uint8_t candidate_index;
 static uint8_t reconnect_fail_count;
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_BLOCK_HOST_ADV_UNTIL_TARGET_CONNECTED)
 static bool host_adv_blocked;
+#endif
 static bool host_connected;
 static int64_t next_connect_allowed_ms;
 static bool sec_policy_cycle_active;
@@ -549,14 +553,11 @@ static bt_security_t get_desired_security_level(void) {
         return level;
     }
 
-    if (target_sec_hint_valid) {
-        bt_security_t hinted = (bt_security_t)target_sec_level_hint;
-        if (hinted < configured) {
-            return configured;
-        }
-        return hinted;
-    }
-
+    /* A previously negotiated level is not a required minimum. Starting a new
+     * pairing at that level can lock a Just Works device into an unnecessary
+     * L3 retry loop. The configured level is the minimum; SMP may still
+     * negotiate a higher level when the peer requires it.
+     */
     return configured;
 }
 
@@ -587,8 +588,10 @@ static void step_security_policy_on_failure(int reason_code, const char *tag) {
         sec_policy_cycle_active = true;
         if (prev_level <= BT_SECURITY_L1) {
             sec_policy_try_idx = 1U; /* raise to L2 */
+        } else if (prev_level == BT_SECURITY_L2) {
+            sec_policy_try_idx = 0U; /* peer may require MITM: try L3 */
         } else {
-            sec_policy_try_idx = 0U; /* raise/keep at L3 */
+            sec_policy_try_idx = 1U; /* L3 rejected: fall back to L2 */
         }
     } else if (!sec_policy_cycle_active) {
         sec_policy_cycle_active = true;
@@ -1146,8 +1149,7 @@ static int load_persisted_target_meta(uint8_t *sec_level_hint, char *name, bool 
         return err;
     }
 
-    *valid = persisted_target_meta_valid;
-    if (*valid) {
+    if (persisted_target_meta_valid) {
         *sec_level_hint = target_sec_level_hint;
         *has_name = target_name_valid;
         if (target_name_valid) {
@@ -1157,6 +1159,7 @@ static int load_persisted_target_meta(uint8_t *sec_level_hint, char *name, bool 
             name[0] = '\0';
         }
     }
+    *valid = persisted_target_meta_valid && target_sec_hint_valid;
     return 0;
 }
 
@@ -2322,9 +2325,12 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
         } else {
             LOG_INF("Persisted target addr");
         }
-        (void)save_persisted_target_meta(target_sec_hint_valid ? target_sec_level_hint
-                                                               : (uint8_t)wanted_sec,
-                                         target_name, target_name_valid);
+        /* Do not persist a requested level as though it had succeeded. The
+         * security callback stores the actually negotiated level later.
+         */
+        target_sec_level_hint = 0U;
+        target_sec_hint_valid = false;
+        (void)save_persisted_target_meta(0U, target_name, target_name_valid);
     }
     gatt_discovery_started = false;
     apply_host_adv_policy(true);
@@ -3124,7 +3130,8 @@ static bool host_ready_for_target_scan(void) {
 }
 
 static void apply_host_adv_policy(bool target_connected) {
-#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_BLOCK_HOST_ADV_UNTIL_TARGET_CONNECTED)
+#if defined(CONFIG_ZMK_BLE) &&                                                                  \
+    defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_BLOCK_HOST_ADV_UNTIL_TARGET_CONNECTED)
     if (!IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_BLOCK_HOST_ADV_UNTIL_TARGET_CONNECTED)) {
         return;
     }
@@ -3374,6 +3381,10 @@ static int ble_hogp_sniffer_init(void) {
 
     printk("[hogp] init called\r\n");
     LOG_INF("BLE HOGP sniffer init");
+    LOG_INF("Pairing compatibility: %s; host output: %s",
+            IS_ENABLED(CONFIG_BT_SMP_SC_PAIR_ONLY) ? "LE Secure Connections only"
+                                                   : "Legacy + Secure Connections",
+            IS_ENABLED(CONFIG_ZMK_BLE) ? "USB + BLE" : "USB");
 
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT) &&                                \
     defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
@@ -3398,8 +3409,10 @@ static int ble_hogp_sniffer_init(void) {
     }
 #endif
 
+#if defined(CONFIG_ZMK_BLE)
     /* Ensure host advertising state machine is nudged at boot. */
     (void)zmk_ble_set_device_name((char *)CONFIG_BT_DEVICE_NAME);
+#endif
 
     target_any_addr = false;
     if (IS_ENABLED(CONFIG_ZMK_BLE_HOGP_SNIFFER_BUTTON_SELECTOR)) {

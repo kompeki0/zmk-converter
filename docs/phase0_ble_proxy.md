@@ -12,13 +12,21 @@ result through the normal ZMK keymap pipeline.
 From your ZMK workspace:
 
 ```sh
-west build -s zmk/app -b seeeduino_xiao_ble -- -DZMK_CONFIG=<this_repo>/config -DSHIELD=xiao_ble_proxy
+west build -s zmk/app -b seeeduino_xiao_ble -- -DZMK_CONFIG=<this_repo>/config -DSHIELD=xiao_ble_proxy -DCONFIG_BT_SMP_SC_PAIR_ONLY=n
 ```
+
+The default `xiao_ble_proxy_normal` and `xiao_ble_proxy_debug_com` profiles use USB for output to
+the PC and accept both LE Legacy Pairing and LE Secure Connections from the target keyboard. Keep
+the XIAO connected to the PC by USB while using either profile.
+
+`xiao_ble_proxy_secure_ble_output` additionally outputs to a PC over BLE, but upstream ZMK v0.3
+forces Secure-Connections-only pairing in that configuration. It therefore cannot connect to a
+target keyboard that supports only LE Legacy Pairing.
 
 If needed, add extra overrides:
 
 ```sh
-west build -s zmk/app -b seeeduino_xiao_ble -- -DZMK_CONFIG=<this_repo>/config -DSHIELD=xiao_ble_proxy -DEXTRA_CONF_FILE=<this_repo>/config/proxy_phase0.conf
+west build -s zmk/app -b seeeduino_xiao_ble -- -DZMK_CONFIG=<this_repo>/config -DSHIELD=xiao_ble_proxy -DEXTRA_CONF_FILE=<this_repo>/config/proxy_phase0.conf -DCONFIG_BT_SMP_SC_PAIR_ONLY=n
 ```
 
 For BLE visibility test from PC (fresh pair each boot):
@@ -26,6 +34,9 @@ For BLE visibility test from PC (fresh pair each boot):
 ```sh
 west build -s zmk/app -b seeeduino_xiao_ble -- -DZMK_CONFIG=<this_repo>/config -DSHIELD=xiao_ble_proxy -DEXTRA_CONF_FILE=\"<this_repo>/config/proxy_phase0.conf;<this_repo>/config/ble_test_visible.conf\"
 ```
+
+This visibility-test profile is also Secure-Connections-only; it is not the profile used to test
+a Legacy-only target keyboard.
 
 For one-shot full reset firmware (clear all bonds/settings-related BLE state):
 
@@ -42,14 +53,16 @@ west flash
 
 ## Expected logs
 Successful flow (wording can vary slightly):
-1. `Scanning started`
-2. `Target candidate ... found`
-3. `Connected to target`
-4. `HID service found, discovering characteristic topology`
-5. `Report Map parsed`
-6. `Subscribed HID input`
-7. `HID discovery complete`
-8. `HID Input` hexdump lines when keys are pressed on target keyboard
+1. `Pairing compatibility: Legacy + Secure Connections; host output: USB`
+2. `Scanning started`
+3. `Target candidate ... found`
+4. `Connected to target`
+5. `Pairing request from target accepted`
+6. `HID service found, discovering characteristic topology`
+7. `Report Map parsed`
+8. `Subscribed HID input`
+9. `HID discovery complete`
+10. `HID Input` hexdump lines when keys are pressed on target keyboard
 
 ## Troubleshooting
 1. No `Target found, connecting`
@@ -59,6 +72,8 @@ Successful flow (wording can vary slightly):
 2. Connect fails repeatedly
 - Move devices closer and reset both sides.
 - Keep target keyboard in pairing/advertising mode.
+- Confirm the startup log says `Legacy + Secure Connections`. If it says `Secure Connections only`,
+  the BLE-output artifact was flashed and a Legacy-only target cannot pair with it.
 
 3. Connected but no HID service/report discovery
 - Confirm target truly exposes HOGP (UUID `0x1812`).

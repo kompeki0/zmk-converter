@@ -27,11 +27,28 @@ include:
       -DCONFIG_ZMK_BLE_HOGP_SNIFFER_CLEAR_NON_TARGET_BONDS_ON_START=n
       -DCONFIG_ZMK_BLE_HOGP_SNIFFER_CLEAR_TARGET_BOND_ON_START=n
       -DCONFIG_ZMK_BLE_HOGP_SNIFFER_SECURITY_LEVEL=2
+      -DCONFIG_BT_SMP_SC_PAIR_ONLY=n
+
+  # Optional PC-BLE output profile. Upstream ZMK v0.3 forces
+  # BT_SMP_SC_PAIR_ONLY when ZMK_BLE is enabled, so this profile cannot pair
+  # with target keyboards that support only LE Legacy Pairing.
+  - board: seeeduino_xiao_ble
+    shield: xiao_ble_proxy
+    artifact-name: xiao_ble_proxy_secure_ble_output
+    cmake-args: >
+      -DCONFIG_ZMK_BLE=y
+      -DCONFIG_ZMK_BLE_HOGP_SNIFFER_BLOCK_HOST_ADV_UNTIL_TARGET_CONNECTED=y
+      -DCONFIG_ZMK_BLE_EXPERIMENTAL_CONN=y
+      -DCONFIG_ZMK_BLE_CLEAR_BONDS_ON_START=n
+      -DCONFIG_ZMK_BLE_HOGP_SNIFFER_CLEAR_NON_TARGET_BONDS_ON_START=n
+      -DCONFIG_ZMK_BLE_HOGP_SNIFFER_CLEAR_TARGET_BOND_ON_START=n
+      -DCONFIG_ZMK_BLE_HOGP_SNIFFER_SECURITY_LEVEL=2
 
   - board: seeeduino_xiao_ble
     shield: xiao_ble_proxy
     artifact-name: xiao_ble_proxy_reset_all
     cmake-args: >
+      -DCONFIG_ZMK_BLE=y
       -DCONFIG_ZMK_BLE_CLEAR_BONDS_ON_START=y
       -DCONFIG_ZMK_BLE_HOGP_SNIFFER_CLEAR_NON_TARGET_BONDS_ON_START=y
       -DCONFIG_ZMK_BLE_HOGP_SNIFFER_CLEAR_TARGET_BOND_ON_START=y
@@ -52,6 +69,7 @@ include:
       -DCONFIG_UART_CONSOLE=y
       -DCONFIG_BT_SMP=y
       -DCONFIG_BT_BONDABLE=y
+      -DCONFIG_BT_SMP_SC_PAIR_ONLY=n
       -DCONFIG_BT_DEBUG_LOG=y
       -DCONFIG_ZMK_BLE_HOGP_SNIFFER_POINTER_DEBUG_LOG=y
 
