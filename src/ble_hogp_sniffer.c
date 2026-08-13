@@ -72,6 +72,7 @@ static struct k_work_delayable candidate_connect_work;
 static struct k_work_delayable picker_probe_timeout_work;
 static struct k_work_delayable security_disconnect_work;
 static struct k_work_delayable hid_discovery_work;
+static struct k_work_delayable gatt_stage_work;
 static struct k_work picker_button_work;
 K_MSGQ_DEFINE(picker_button_msgq, sizeof(uint8_t), 16, 4);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_SELFTEST_TYPE_TESTING_ON_BOOT) &&                                \
@@ -107,6 +108,21 @@ static uint8_t picker_probe_pos;
 static bt_addr_le_t picker_probe_addr;
 static bool picker_probe_addr_valid;
 static uint8_t pending_disconnect_reason;
+
+enum hogp_gatt_stage {
+    HOGP_GATT_STAGE_NONE,
+    HOGP_GATT_STAGE_DISCOVER_CHARACTERISTICS,
+    HOGP_GATT_STAGE_READ_REPORT_MAP,
+    HOGP_GATT_STAGE_DISCOVER_NEXT_INPUT,
+    HOGP_GATT_STAGE_READ_REPORT_REFERENCE,
+    HOGP_GATT_STAGE_SUBSCRIBE_INPUT,
+};
+
+static enum hogp_gatt_stage pending_gatt_stage;
+static bool pending_sub_report_ref_valid;
+static uint8_t pending_sub_report_id;
+static uint8_t pending_sub_report_type;
+static bool pending_sub_boot_keyboard;
 
 static struct bt_uuid_16 hids_uuid = BT_UUID_INIT_16(BT_UUID_HIDS_VAL);
 static struct bt_uuid_16 report_ref_uuid = BT_UUID_INIT_16(0x2908);
@@ -263,6 +279,13 @@ static void picker_button_work_handler(struct k_work *work);
 static void security_disconnect_work_handler(struct k_work *work);
 static void hid_discovery_work_handler(struct k_work *work);
 static void schedule_hid_discovery(uint32_t delay_ms);
+static void gatt_stage_work_handler(struct k_work *work);
+static void schedule_gatt_stage(enum hogp_gatt_stage stage, uint32_t delay_ms);
+static int start_hids_characteristic_discovery(struct bt_conn *conn);
+static int start_report_map_read(struct bt_conn *conn);
+static int start_report_reference_read(struct bt_conn *conn);
+static int start_pending_subscription(struct bt_conn *conn);
+static void select_boot_protocol_if_needed(struct bt_conn *conn);
 static int discover_hids(struct bt_conn *conn);
 static int save_persisted_target_addr(const bt_addr_le_t *addr);
 static int load_persisted_target_addr(bt_addr_le_t *addr, bool *valid);
@@ -347,6 +370,72 @@ static void schedule_hid_discovery(uint32_t delay_ms) {
     gatt_discovery_started = true;
     k_work_reschedule(&hid_discovery_work, K_MSEC(delay_ms));
     LOG_INF("HID discovery scheduled in %u ms", delay_ms);
+}
+
+static const char *gatt_stage_name(enum hogp_gatt_stage stage) {
+    switch (stage) {
+    case HOGP_GATT_STAGE_DISCOVER_CHARACTERISTICS:
+        return "characteristics";
+    case HOGP_GATT_STAGE_READ_REPORT_MAP:
+        return "report-map";
+    case HOGP_GATT_STAGE_DISCOVER_NEXT_INPUT:
+        return "input-descriptors";
+    case HOGP_GATT_STAGE_READ_REPORT_REFERENCE:
+        return "report-reference";
+    case HOGP_GATT_STAGE_SUBSCRIBE_INPUT:
+        return "subscribe";
+    default:
+        return "none";
+    }
+}
+
+static void schedule_gatt_stage(enum hogp_gatt_stage stage, uint32_t delay_ms) {
+    pending_gatt_stage = stage;
+    k_work_reschedule(&gatt_stage_work, K_MSEC(delay_ms));
+    LOG_INF("GATT stage scheduled: %s in %u ms", gatt_stage_name(stage), delay_ms);
+}
+
+static void gatt_stage_work_handler(struct k_work *work) {
+    enum hogp_gatt_stage stage = pending_gatt_stage;
+    int err = 0;
+    ARG_UNUSED(work);
+
+    if (!default_conn || !gatt_discovery_started || stage == HOGP_GATT_STAGE_NONE) {
+        return;
+    }
+
+    pending_gatt_stage = HOGP_GATT_STAGE_NONE;
+    LOG_INF("Starting GATT stage: %s", gatt_stage_name(stage));
+
+    switch (stage) {
+    case HOGP_GATT_STAGE_DISCOVER_CHARACTERISTICS:
+        err = start_hids_characteristic_discovery(default_conn);
+        break;
+    case HOGP_GATT_STAGE_READ_REPORT_MAP:
+        select_boot_protocol_if_needed(default_conn);
+        err = start_report_map_read(default_conn);
+        break;
+    case HOGP_GATT_STAGE_DISCOVER_NEXT_INPUT:
+        discover_next_input_report(default_conn);
+        break;
+    case HOGP_GATT_STAGE_READ_REPORT_REFERENCE:
+        err = start_report_reference_read(default_conn);
+        break;
+    case HOGP_GATT_STAGE_SUBSCRIBE_INPUT:
+        err = start_pending_subscription(default_conn);
+        break;
+    default:
+        return;
+    }
+
+    if (err == -ENOMEM || err == -EAGAIN) {
+        LOG_WRN("GATT stage %s temporarily busy (%d), retrying", gatt_stage_name(stage), err);
+        schedule_gatt_stage(stage, 50U);
+    } else if (err) {
+        LOG_ERR("GATT stage %s failed (%d)", gatt_stage_name(stage), err);
+        gatt_discovery_started = false;
+        schedule_security_disconnect(BT_HCI_ERR_REMOTE_USER_TERM_CONN, 100U);
+    }
 }
 
 static bool usage_to_row_col(uint8_t usage, uint16_t *row, uint16_t *col) {
@@ -1820,6 +1909,9 @@ static uint8_t notify_cb(struct bt_conn *conn, struct bt_gatt_subscribe_params *
 }
 
 static void finish_report_discovery(void) {
+    gatt_discovery_started = false;
+    pending_gatt_stage = HOGP_GATT_STAGE_NONE;
+
     if (report_sub_count == 0U) {
         LOG_ERR("No notifiable HID input characteristic subscribed");
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
@@ -1838,24 +1930,77 @@ static void finish_report_discovery(void) {
 #endif
 }
 
-static void subscribe_pending_report(struct bt_conn *conn, bool report_ref_valid, uint8_t report_id,
-                                     uint8_t report_type, bool boot_keyboard) {
+static void queue_pending_subscription(bool report_ref_valid, uint8_t report_id,
+                                       uint8_t report_type, bool boot_keyboard) {
+    pending_sub_report_ref_valid = report_ref_valid;
+    pending_sub_report_id = report_id;
+    pending_sub_report_type = report_type;
+    pending_sub_boot_keyboard = boot_keyboard;
+    schedule_gatt_stage(HOGP_GATT_STAGE_SUBSCRIBE_INPUT, 1U);
+}
+
+static void subscribe_complete_cb(struct bt_conn *conn, uint8_t err,
+                                  struct bt_gatt_subscribe_params *params) {
+    uint8_t sub_idx = 0xFFU;
+
+    if (conn != default_conn) {
+        return;
+    }
+
+    for (uint8_t i = 0U; i < report_sub_count; i++) {
+        if (params == &subscribe_params[i]) {
+            sub_idx = i;
+            break;
+        }
+    }
+
+    if (err) {
+        LOG_ERR("HID input subscription rejected (sub=%u vh=0x%04x att=%u)", sub_idx,
+                params->value_handle, err);
+        if (sub_idx != 0xFFU && sub_idx + 1U == report_sub_count) {
+            report_sub_count--;
+            memset(&subscribe_params[sub_idx], 0, sizeof(subscribe_params[sub_idx]));
+            memset(&report_meta[sub_idx], 0, sizeof(report_meta[sub_idx]));
+        }
+    } else {
+        reconnect_fail_count = 0;
+        target_hid_verified = true;
+        LOG_INF("Subscribed HID input #%u (vh=0x%04x ccc=0x%04x id=%u%s)", sub_idx + 1U,
+                params->value_handle, params->ccc_handle,
+                sub_idx == 0xFFU ? 0U : report_meta[sub_idx].report_id,
+                sub_idx == 0xFFU
+                    ? " unknown"
+                    : (report_meta[sub_idx].boot_keyboard
+                           ? " boot"
+                           : (report_meta[sub_idx].report_ref_valid ? "" : " unknown")));
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+        zmk_hogp_sniffer_screen_log_verbose_code(screen_emit_usage_state, "sub ok",
+                                                 report_sub_count);
+#endif
+    }
+
+    pending_hids_characteristic++;
+    schedule_gatt_stage(HOGP_GATT_STAGE_DISCOVER_NEXT_INPUT, 1U);
+}
+
+static int start_pending_subscription(struct bt_conn *conn) {
     int err;
 
-    if (report_ref_valid && report_type != 1U) {
-        LOG_DBG("Skip non-input Report id=%u type=%u vh=0x%04x", report_id, report_type,
+    if (pending_sub_report_ref_valid && pending_sub_report_type != 1U) {
+        LOG_DBG("Skip non-input Report id=%u type=%u vh=0x%04x", pending_sub_report_id,
+                pending_sub_report_type,
                 pending_report_value_handle);
         pending_hids_characteristic++;
-        discover_next_input_report(conn);
-        return;
+        schedule_gatt_stage(HOGP_GATT_STAGE_DISCOVER_NEXT_INPUT, 1U);
+        return 0;
     }
 
     if (report_sub_count >= MAX_REPORT_SUBSCRIPTIONS) {
         LOG_WRN("Reached max report subscriptions (%u), skip vh=0x%04x",
                 MAX_REPORT_SUBSCRIPTIONS, pending_report_value_handle);
         pending_hids_characteristic++;
-        discover_next_input_report(conn);
-        return;
+        schedule_gatt_stage(HOGP_GATT_STAGE_DISCOVER_NEXT_INPUT, 1U);
+        return 0;
     }
 
     struct bt_gatt_subscribe_params *sub = &subscribe_params[report_sub_count];
@@ -1864,38 +2009,42 @@ static void subscribe_pending_report(struct bt_conn *conn, bool report_ref_valid
     memset(sub, 0, sizeof(*sub));
     memset(meta, 0, sizeof(*meta));
     sub->notify = notify_cb;
+    sub->subscribe = subscribe_complete_cb;
     sub->value = (pending_report_properties & BT_GATT_CHRC_NOTIFY) != 0U
                      ? BT_GATT_CCC_NOTIFY
                      : BT_GATT_CCC_INDICATE;
     sub->value_handle = pending_report_value_handle;
     sub->ccc_handle = pending_ccc_handle;
     atomic_set_bit(sub->flags, BT_GATT_SUBSCRIBE_FLAG_VOLATILE);
-    meta->report_id = report_id;
-    meta->report_type = report_type;
-    meta->report_ref_valid = report_ref_valid;
-    meta->boot_keyboard = boot_keyboard;
+    meta->report_id = pending_sub_report_id;
+    meta->report_type = pending_sub_report_type;
+    meta->report_ref_valid = pending_sub_report_ref_valid;
+    meta->boot_keyboard = pending_sub_boot_keyboard;
 
     err = bt_gatt_subscribe(conn, sub);
     if (err) {
-        LOG_ERR("bt_gatt_subscribe failed for vh=0x%04x (%d)", pending_report_value_handle, err);
+        if (err == -ENOMEM || err == -EAGAIN) {
+            return err;
+        }
+        LOG_ERR("bt_gatt_subscribe failed for vh=0x%04x (%d)", pending_report_value_handle,
+                err);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
         zmk_hogp_sniffer_screen_log_verbose_code(screen_emit_usage_state, "sub err",
                                                  (uint32_t)(-err));
 #endif
-    } else {
-        reconnect_fail_count = 0;
-        target_hid_verified = true;
-        report_sub_count++;
-        LOG_INF("Subscribed HID input #%u (vh=0x%04x ccc=0x%04x id=%u%s)", report_sub_count,
-                pending_report_value_handle, pending_ccc_handle, report_id,
-                boot_keyboard ? " boot" : (report_ref_valid ? "" : " unknown"));
-#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-        zmk_hogp_sniffer_screen_log_verbose_code(screen_emit_usage_state, "sub ok", report_sub_count);
-#endif
+        pending_hids_characteristic++;
+        schedule_gatt_stage(HOGP_GATT_STAGE_DISCOVER_NEXT_INPUT, 1U);
+        return 0;
     }
 
-    pending_hids_characteristic++;
-    discover_next_input_report(conn);
+    /* Reserve the slot before the CCC write completes so an early notification
+     * can already resolve its report metadata. The completion callback advances
+     * to the next characteristic only after the ATT transaction has finished.
+     */
+    report_sub_count++;
+    LOG_INF("HID input subscription queued (vh=0x%04x ccc=0x%04x)",
+            pending_report_value_handle, pending_ccc_handle);
+    return 0;
 }
 
 static uint8_t report_ref_read_cb(struct bt_conn *conn, uint8_t err,
@@ -1910,12 +2059,12 @@ static uint8_t report_ref_read_cb(struct bt_conn *conn, uint8_t err,
     if (err || !data || length < 2U) {
         LOG_WRN("Report Reference read failed for vh=0x%04x (att=%u len=%u)",
                 pending_report_value_handle, err, length);
-        subscribe_pending_report(conn, false, 0U, 0U, false);
+        queue_pending_subscription(false, 0U, 0U, false);
         return BT_GATT_ITER_STOP;
     }
 
     const uint8_t *ref = data;
-    subscribe_pending_report(conn, true, ref[0], ref[1], false);
+    queue_pending_subscription(true, ref[0], ref[1], false);
     return BT_GATT_ITER_STOP;
 }
 
@@ -1945,15 +2094,20 @@ static uint8_t discover_report_descriptor_cb(struct bt_conn *conn,
         LOG_WRN("CCC not found in characteristic boundary for vh=0x%04x",
                 pending_report_value_handle);
         pending_hids_characteristic++;
-        discover_next_input_report(conn);
+        schedule_gatt_stage(HOGP_GATT_STAGE_DISCOVER_NEXT_INPUT, 1U);
         return BT_GATT_ITER_STOP;
     }
 
     if (boot_keyboard || pending_report_ref_handle == 0U) {
-        subscribe_pending_report(conn, false, 0U, 0U, boot_keyboard);
+        queue_pending_subscription(false, 0U, 0U, boot_keyboard);
         return BT_GATT_ITER_STOP;
     }
 
+    schedule_gatt_stage(HOGP_GATT_STAGE_READ_REPORT_REFERENCE, 1U);
+    return BT_GATT_ITER_STOP;
+}
+
+static int start_report_reference_read(struct bt_conn *conn) {
     memset(&active_target.report_ref_read_params, 0,
            sizeof(active_target.report_ref_read_params));
     active_target.report_ref_read_params.func = report_ref_read_cb;
@@ -1962,10 +2116,15 @@ static uint8_t discover_report_descriptor_cb(struct bt_conn *conn,
     active_target.report_ref_read_params.single.offset = 0U;
     int err = bt_gatt_read(conn, &active_target.report_ref_read_params);
     if (err) {
+        if (err == -ENOMEM || err == -EAGAIN) {
+            return err;
+        }
         LOG_WRN("Report Reference read start failed (%d)", err);
-        subscribe_pending_report(conn, false, 0U, 0U, false);
+        queue_pending_subscription(false, 0U, 0U, false);
+        return 0;
     }
-    return BT_GATT_ITER_STOP;
+    LOG_INF("Reading HID Report Reference (handle=0x%04x)", pending_report_ref_handle);
+    return 0;
 }
 
 static void discover_next_input_report(struct bt_conn *conn) {
@@ -1994,9 +2153,8 @@ static void discover_next_input_report(struct bt_conn *conn) {
             continue;
         }
 
-        /* Descriptor discovery may chain to the next report from inside its
-         * completion callback. Alternate parameter objects so Zephyr's
-         * cleanup of the just-completed procedure cannot clear the new one.
+        /* Keep successive descriptor procedures on alternating parameter
+         * objects as an extra guard against cleanup of the previous request.
          */
         active_target.report_descriptor_discover_slot ^= 1U;
         struct bt_gatt_discover_params *descriptor_params =
@@ -2011,6 +2169,10 @@ static void discover_next_input_report(struct bt_conn *conn) {
 
         int err = bt_gatt_discover(conn, descriptor_params);
         if (err) {
+            if (err == -ENOMEM || err == -EAGAIN) {
+                schedule_gatt_stage(HOGP_GATT_STAGE_DISCOVER_NEXT_INPUT, 50U);
+                return;
+            }
             LOG_ERR("HID descriptor discovery failed for vh=0x%04x (%d)",
                     characteristic->value_handle, err);
             pending_hids_characteristic++;
@@ -2043,7 +2205,8 @@ static uint8_t report_map_read_cb(struct bt_conn *conn, uint8_t err,
     if (err) {
         LOG_WRN("Report Map read failed (att=%u); fixed-format fallback remains active", err);
         report_map_valid = false;
-        begin_input_report_discovery(conn);
+        pending_hids_characteristic = 0U;
+        schedule_gatt_stage(HOGP_GATT_STAGE_DISCOVER_NEXT_INPUT, 1U);
         return BT_GATT_ITER_STOP;
     }
 
@@ -2077,11 +2240,12 @@ static uint8_t report_map_read_cb(struct bt_conn *conn, uint8_t err,
         }
     }
 
-    begin_input_report_discovery(conn);
+    pending_hids_characteristic = 0U;
+    schedule_gatt_stage(HOGP_GATT_STAGE_DISCOVER_NEXT_INPUT, 1U);
     return BT_GATT_ITER_STOP;
 }
 
-static void read_report_map_or_discover_inputs(struct bt_conn *conn) {
+static int start_report_map_read(struct bt_conn *conn) {
     uint16_t report_map_handle = 0U;
 
     for (uint8_t i = 0U; i < hids_characteristic_count; i++) {
@@ -2094,7 +2258,7 @@ static void read_report_map_or_discover_inputs(struct bt_conn *conn) {
     if (report_map_handle == 0U) {
         LOG_WRN("Report Map characteristic not found; using fixed-format fallback");
         begin_input_report_discovery(conn);
-        return;
+        return 0;
     }
 
     memset(&active_target.report_map_read_params, 0,
@@ -2109,11 +2273,15 @@ static void read_report_map_or_discover_inputs(struct bt_conn *conn) {
 
     int err = bt_gatt_read(conn, &active_target.report_map_read_params);
     if (err) {
+        if (err == -ENOMEM || err == -EAGAIN) {
+            return err;
+        }
         LOG_WRN("Report Map read start failed (%d); using fallback", err);
         begin_input_report_discovery(conn);
     } else {
         LOG_INF("Reading HID Report Map (vh=0x%04x)", report_map_handle);
     }
+    return 0;
 }
 
 static void select_boot_protocol_if_needed(struct bt_conn *conn) {
@@ -2166,8 +2334,7 @@ static uint8_t discover_hids_characteristic_cb(struct bt_conn *conn,
         }
         LOG_INF("HID characteristic topology discovered (count=%u)",
                 hids_characteristic_count);
-        select_boot_protocol_if_needed(conn);
-        read_report_map_or_discover_inputs(conn);
+        schedule_gatt_stage(HOGP_GATT_STAGE_READ_REPORT_MAP, 1U);
         return BT_GATT_ITER_STOP;
     }
 
@@ -2192,7 +2359,6 @@ static uint8_t discover_hids_characteristic_cb(struct bt_conn *conn,
 
 static uint8_t discover_hids_cb(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                                 struct bt_gatt_discover_params *params) {
-    int err;
     const struct bt_gatt_service_val *svc;
     ARG_UNUSED(params);
 
@@ -2202,6 +2368,8 @@ static uint8_t discover_hids_cb(struct bt_conn *conn, const struct bt_gatt_attr 
 
     if (!attr) {
         LOG_ERR("HID service not found");
+        gatt_discovery_started = false;
+        schedule_security_disconnect(BT_HCI_ERR_REMOTE_USER_TERM_CONN, 100U);
         return BT_GATT_ITER_STOP;
     }
 
@@ -2226,6 +2394,15 @@ static uint8_t discover_hids_cb(struct bt_conn *conn, const struct bt_gatt_attr 
     hogp_hid_parser_reset(&active_target.hid_parser);
     report_map_valid = false;
 
+    LOG_INF("HID service found; characteristic discovery deferred from BT RX callback");
+#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
+    zmk_hogp_sniffer_screen_log_verbose_text(screen_emit_usage_state, "hids found");
+#endif
+    schedule_gatt_stage(HOGP_GATT_STAGE_DISCOVER_CHARACTERISTICS, 1U);
+    return BT_GATT_ITER_STOP;
+}
+
+static int start_hids_characteristic_discovery(struct bt_conn *conn) {
     struct bt_gatt_discover_params *characteristic_params =
         &active_target.hids_characteristic_discover_params;
     memset(characteristic_params, 0, sizeof(*characteristic_params));
@@ -2234,21 +2411,21 @@ static uint8_t discover_hids_cb(struct bt_conn *conn, const struct bt_gatt_attr 
     characteristic_params->end_handle = hids_end_handle;
     characteristic_params->type = BT_GATT_DISCOVER_CHARACTERISTIC;
     characteristic_params->func = discover_hids_characteristic_cb;
-    err = bt_gatt_discover(conn, characteristic_params);
+    int err = bt_gatt_discover(conn, characteristic_params);
     if (err) {
-        LOG_ERR("HID characteristic discovery failed (%d)", err);
+        if (err == -ENOMEM || err == -EAGAIN) {
+            return err;
+        }
+        LOG_ERR("HID characteristic discovery start failed (%d)", err);
 #if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
         zmk_hogp_sniffer_screen_log_verbose_code(screen_emit_usage_state, "report disc err",
                                                  (uint32_t)(-err));
 #endif
     } else {
-        LOG_INF("HID service found, discovering characteristic topology");
-#if defined(CONFIG_ZMK_BLE_HOGP_SNIFFER_FORWARD_KEY_EVENTS)
-        zmk_hogp_sniffer_screen_log_verbose_text(screen_emit_usage_state, "hids found");
-#endif
+        LOG_INF("Discovering HID characteristic topology (range=0x%04x-0x%04x)",
+                characteristic_params->start_handle, characteristic_params->end_handle);
     }
-
-    return BT_GATT_ITER_STOP;
+    return err;
 }
 
 static int discover_hids(struct bt_conn *conn) {
@@ -2383,6 +2560,8 @@ static void connected_cb(struct bt_conn *conn, uint8_t err) {
     }
     gatt_discovery_started = false;
     k_work_cancel_delayable(&hid_discovery_work);
+    pending_gatt_stage = HOGP_GATT_STAGE_NONE;
+    k_work_cancel_delayable(&gatt_stage_work);
     apply_host_adv_policy(true);
 
     derr = bt_conn_le_param_update(conn, &target_conn_param);
@@ -2438,6 +2617,8 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason) {
     LOG_INF("Disconnected (reason 0x%02x: %s)", reason,
             zmk_hogp_sniffer_hci_reason_to_str(reason));
     k_work_cancel_delayable(&hid_discovery_work);
+    pending_gatt_stage = HOGP_GATT_STAGE_NONE;
+    k_work_cancel_delayable(&gatt_stage_work);
     if (reason == BT_HCI_ERR_CONN_FAIL_TO_ESTAB || reason == BT_HCI_ERR_REMOTE_USER_TERM_CONN ||
         reason == BT_HCI_ERR_CONN_TIMEOUT) {
         next_connect_allowed_ms = k_uptime_get() + 10000;
@@ -3559,6 +3740,7 @@ static int ble_hogp_sniffer_schedule_init(void) {
     k_work_init_delayable(&picker_probe_timeout_work, picker_probe_timeout_work_handler);
     k_work_init_delayable(&security_disconnect_work, security_disconnect_work_handler);
     k_work_init_delayable(&hid_discovery_work, hid_discovery_work_handler);
+    k_work_init_delayable(&gatt_stage_work, gatt_stage_work_handler);
     k_work_init(&picker_button_work, picker_button_work_handler);
     k_work_init_delayable(&sniffer_start_work, sniffer_start_work_handler);
     k_work_schedule(&sniffer_start_work, K_SECONDS(3));
