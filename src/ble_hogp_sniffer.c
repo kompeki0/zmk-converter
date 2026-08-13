@@ -287,6 +287,7 @@ static void schedule_hid_discovery(uint32_t delay_ms);
 static void gatt_stage_work_handler(struct k_work *work);
 static void schedule_gatt_stage(enum hogp_gatt_stage stage, uint32_t delay_ms);
 static int start_hids_characteristic_discovery(struct bt_conn *conn);
+static void finish_hids_characteristic_discovery(struct bt_conn *conn, const char *reason);
 static int start_report_map_read(struct bt_conn *conn);
 static int start_report_reference_read(struct bt_conn *conn);
 static int start_pending_subscription(struct bt_conn *conn);
@@ -2331,15 +2332,7 @@ static uint8_t discover_hids_characteristic_cb(struct bt_conn *conn,
     }
 
     if (!attr) {
-        for (uint8_t i = 0U; i < hids_characteristic_count; i++) {
-            active_target.hids_characteristics[i].end_handle =
-                (i + 1U < hids_characteristic_count)
-                    ? (uint16_t)(active_target.hids_characteristics[i + 1U].declaration_handle - 1U)
-                    : hids_end_handle;
-        }
-        LOG_INF("HID characteristic topology discovered (count=%u)",
-                hids_characteristic_count);
-        schedule_gatt_stage(HOGP_GATT_STAGE_READ_REPORT_MAP, 1U);
+        finish_hids_characteristic_discovery(conn, "ATT range complete");
         return BT_GATT_ITER_STOP;
     }
 
@@ -2362,7 +2355,31 @@ static uint8_t discover_hids_characteristic_cb(struct bt_conn *conn,
             hids_characteristic_count, characteristic->uuid16, characteristic->declaration_handle,
             characteristic->value_handle, characteristic->properties);
 
+    /* Some keyboards expose HIDS as the final service (end handle 0xffff) and
+     * never answer the terminal "anything after this handle?" request. In the
+     * observed standard HIDS layout, Control Point follows Report Map and all
+     * Report characteristics. Stop there only for that unbounded-service case;
+     * services with a real end handle still use normal ATT completion.
+     */
+    if (characteristic->uuid16 == 0x2A4CU && hids_end_handle == BT_ATT_LAST_ATTRIBUTE_HANDLE) {
+        finish_hids_characteristic_discovery(conn, "HID Control Point reached");
+        return BT_GATT_ITER_STOP;
+    }
+
     return BT_GATT_ITER_CONTINUE;
+}
+
+static void finish_hids_characteristic_discovery(struct bt_conn *conn, const char *reason) {
+    for (uint8_t i = 0U; i < hids_characteristic_count; i++) {
+        active_target.hids_characteristics[i].end_handle =
+            (i + 1U < hids_characteristic_count)
+                ? (uint16_t)(active_target.hids_characteristics[i + 1U].declaration_handle - 1U)
+                : hids_end_handle;
+    }
+    LOG_INF("HID characteristic topology discovered (count=%u, %s)",
+            hids_characteristic_count, reason);
+    schedule_gatt_stage(HOGP_GATT_STAGE_READ_REPORT_MAP, 5U);
+    ARG_UNUSED(conn);
 }
 
 static uint8_t discover_hids_cb(struct bt_conn *conn, const struct bt_gatt_attr *attr,
@@ -2714,6 +2731,31 @@ static void le_param_updated_cb(struct bt_conn *conn, uint16_t interval, uint16_
             (uint32_t)timeout * 10U);
 }
 
+static bool le_param_req_cb(struct bt_conn *conn, struct bt_le_conn_param *param) {
+    uint16_t requested_timeout;
+
+    if (conn != default_conn) {
+        return true;
+    }
+
+    requested_timeout = param->timeout;
+    /* A few keyboards request a sub-second supervision timeout. It is legal
+     * for their interval/latency, but too fragile during encrypted GATT
+     * discovery and causes a single missed burst to drop the whole link.
+     * Keep the keyboard's preferred interval and latency, while raising only
+     * the timeout to a conservative four seconds.
+     */
+    if (param->timeout < 400U) {
+        param->timeout = 400U;
+    }
+
+    LOG_INF("Target conn param request: interval=%u-%u, latency=%u, timeout=%u ms%s",
+            param->interval_min, param->interval_max, param->latency,
+            (uint32_t)requested_timeout * 10U,
+            requested_timeout != param->timeout ? " (timeout adjusted to 4000 ms)" : "");
+    return true;
+}
+
 static void security_changed_cb(struct bt_conn *conn, bt_security_t level, enum bt_security_err err) {
     bt_security_t wanted_sec = get_desired_security_level();
 
@@ -2903,6 +2945,7 @@ static struct bt_conn_auth_info_cb auth_info_cb = {
 BT_CONN_CB_DEFINE(conn_callbacks) = {
     .connected = connected_cb,
     .disconnected = disconnected_cb,
+    .le_param_req = le_param_req_cb,
     .le_param_updated = le_param_updated_cb,
 #if defined(CONFIG_BT_SMP)
     .security_changed = security_changed_cb,
